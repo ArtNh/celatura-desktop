@@ -37,7 +37,6 @@ fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
-
 // 默认 Google Cloud Client 配置（可通过环境或设置传入覆盖）
 const DEFAULT_CLIENT_ID: &str = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
 const DEFAULT_CLIENT_SECRET: &str = "YOUR_GOOGLE_CLIENT_SECRET";
@@ -119,139 +118,15 @@ fn get_auth_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     Ok(config_dir.join("auth_token.json"))
 }
 
-// ============================================================================
-// Tauri Commands 实现
-// ============================================================================
-
-/// Command 1: 向谷歌设备端点请求设备授权码
-#[tauri::command]
-pub async fn request_device_code(
-    client_id: Option<String>,
-) -> Result<DeviceCodeResponse, String> {
-    let client = reqwest::Client::new();
-    let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
-
-    let params = [
-        ("client_id", cid.as_str()),
-        ("scope", DEFAULT_SCOPE),
-    ];
-
-    let res = client
-        .post(GOOGLE_DEVICE_CODE_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("网络请求失败，请检查代理设置: {}", e))?;
-
-    if !res.status().is_success() {
-        let err_text = res.text().await.unwrap_or_default();
-        return Err(format!("谷歌 OAuth 设备端点异常: {}", err_text));
-    }
-
-    let device_resp = res
-        .json::<DeviceCodeResponse>()
-        .await
-        .map_err(|e| format!("解析设备码数据失败: {}", e))?;
-
-    Ok(device_resp)
-}
-
-/// Command 2: 轮询谷歌 Token 端点并精准匹配错误码
-#[tauri::command]
-pub async fn poll_for_token(
-    device_code: String,
-    client_id: Option<String>,
-    client_secret: Option<String>,
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<PollTokenResponse, String> {
-    let client = reqwest::Client::new();
-    let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
-    let csecret = client_secret.unwrap_or_else(|| DEFAULT_CLIENT_SECRET.to_string());
-
-    let params = [
-        ("client_id", cid.as_str()),
-        ("client_secret", csecret.as_str()),
-        ("device_code", device_code.as_str()),
-        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-    ];
-
-    let res = client
-        .post(GOOGLE_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| format!("Token 轮询网络异常: {}", e))?;
-
-    let raw_resp = res
-        .json::<RawGoogleTokenResponse>()
-        .await
-        .map_err(|e| format!("Token 响应解析失败: {}", e))?;
-
-    // 1. 检查授权成功分支
-    if let Some(access_token) = raw_resp.access_token {
-        let now_sec = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let auth_token = AuthToken {
-            access_token,
-            refresh_token: raw_resp.refresh_token,
-            expires_in: raw_resp.expires_in,
-            token_type: raw_resp.token_type,
-            scope: raw_resp.scope,
-            created_at: now_sec,
-        };
-
-        // 更新内存状态与文件持久化
-        let _ = save_token_internal(&app_handle, &state, auth_token.clone());
-
-        return Ok(PollTokenResponse {
-            status: PollStatus::Success,
-            token: Some(auth_token),
-            error_code: None,
-            error_description: None,
-        });
-    }
-
-    // 2. 检查错误状态分支与精准错误码匹配
-    if let Some(ref err_str) = raw_resp.error {
-        let status = match err_str.as_str() {
-            "authorization_pending" => PollStatus::Pending,
-            "slow_down" => PollStatus::SlowDown,
-            "access_denied" => PollStatus::AccessDenied,
-            "expired_token" => PollStatus::ExpiredToken,
-            _ => PollStatus::Failed,
-        };
-
-        return Ok(PollTokenResponse {
-            status,
-            token: None,
-            error_code: Some(err_str.clone()),
-            error_description: raw_resp.error_description,
-        });
-    }
-
-    Ok(PollTokenResponse {
-        status: PollStatus::Failed,
-        token: None,
-        error_code: Some("unknown_response".to_string()),
-        error_description: Some("未从响应中识别出有效 Token 或标准错误".to_string()),
-    })
-}
-
 /// 内部辅助：保存凭证至文件与全局 State
 fn save_token_internal(
     app_handle: &AppHandle,
     state: &State<'_, AppState>,
     token: AuthToken,
 ) -> Result<(), String> {
-    // 写入内存 State
     let mut store = state.token.lock().map_err(|_| "内存锁损坏".to_string())?;
     *store = Some(token.clone());
 
-    // 持久化到本地配置文件
     let file_path = get_auth_file_path(app_handle)?;
     let json_data = serde_json::to_string_pretty(&token)
         .map_err(|e| format!("序列化凭证失败: {}", e))?;
@@ -261,189 +136,304 @@ fn save_token_internal(
     Ok(())
 }
 
-/// Command 3: 手动保存 Token
-#[tauri::command]
-pub fn save_token(
-    token: AuthToken,
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    save_token_internal(&app_handle, &state, token)
-}
+// ============================================================================
+// Tauri Commands 模块定义 (隔离命令命名空间)
+// ============================================================================
+pub mod commands {
+    use super::*;
 
-/// Command 4: 读取持久化的 AuthToken
-#[tauri::command]
-pub fn load_token(
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<AuthToken>, String> {
-    // 优先尝试从内存中获取
-    if let Ok(store) = state.token.lock() {
-        if let Some(ref token) = *store {
-            return Ok(Some(token.clone()));
-        }
-    }
+    /// Command 1: 向谷歌设备端点请求设备授权码
+    #[tauri::command]
+    pub async fn request_device_code(
+        client_id: Option<String>,
+    ) -> Result<DeviceCodeResponse, String> {
+        let client = reqwest::Client::new();
+        let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
 
-    // 若内存无值，从本地文件加载
-    let file_path = get_auth_file_path(&app_handle)?;
-    if file_path.exists() {
-        let content = fs::read_to_string(&file_path)
-            .map_err(|e| format!("读取凭证文件失败: {}", e))?;
+        let params = [
+            ("client_id", cid.as_str()),
+            ("scope", DEFAULT_SCOPE),
+        ];
 
-        let token: AuthToken = serde_json::from_str(&content)
-            .map_err(|e| format!("解析凭证文件失败: {}", e))?;
+        let res = client
+            .post(GOOGLE_DEVICE_CODE_URL)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("网络请求失败，请检查代理设置: {}", e))?;
 
-        // 重新同步回内存
-        if let Ok(mut store) = state.token.lock() {
-            *store = Some(token.clone());
+        if !res.status().is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(format!("谷歌 OAuth 设备端点异常: {}", err_text));
         }
 
-        return Ok(Some(token));
+        let device_resp = res
+            .json::<DeviceCodeResponse>()
+            .await
+            .map_err(|e| format!("解析设备码数据失败: {}", e))?;
+
+        Ok(device_resp)
     }
 
-    Ok(None)
-}
+    /// Command 2: 轮询谷歌 Token 端点并精准匹配错误码
+    #[tauri::command]
+    pub async fn poll_for_token(
+        device_code: String,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        app_handle: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<PollTokenResponse, String> {
+        let client = reqwest::Client::new();
+        let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
+        let csecret = client_secret.unwrap_or_else(|| DEFAULT_CLIENT_SECRET.to_string());
 
-/// Command 5: 清除已保存的 AuthToken
-#[tauri::command]
-pub fn clear_token(
-    app_handle: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 重置内存
-    if let Ok(mut store) = state.token.lock() {
-        *store = None;
+        let params = [
+            ("client_id", cid.as_str()),
+            ("client_secret", csecret.as_str()),
+            ("device_code", device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ];
+
+        let res = client
+            .post(GOOGLE_TOKEN_URL)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Token 轮询网络异常: {}", e))?;
+
+        let raw_resp = res
+            .json::<RawGoogleTokenResponse>()
+            .await
+            .map_err(|e| format!("Token 响应解析失败: {}", e))?;
+
+        if let Some(access_token) = raw_resp.access_token {
+            let now_sec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let auth_token = AuthToken {
+                access_token,
+                refresh_token: raw_resp.refresh_token,
+                expires_in: raw_resp.expires_in,
+                token_type: raw_resp.token_type,
+                scope: raw_resp.scope,
+                created_at: now_sec,
+            };
+
+            let _ = save_token_internal(&app_handle, &state, auth_token.clone());
+
+            return Ok(PollTokenResponse {
+                status: PollStatus::Success,
+                token: Some(auth_token),
+                error_code: None,
+                error_description: None,
+            });
+        }
+
+        if let Some(ref err_str) = raw_resp.error {
+            let status = match err_str.as_str() {
+                "authorization_pending" => PollStatus::Pending,
+                "slow_down" => PollStatus::SlowDown,
+                "access_denied" => PollStatus::AccessDenied,
+                "expired_token" => PollStatus::ExpiredToken,
+                _ => PollStatus::Failed,
+            };
+
+            return Ok(PollTokenResponse {
+                status,
+                token: None,
+                error_code: Some(err_str.clone()),
+                error_description: raw_resp.error_description,
+            });
+        }
+
+        Ok(PollTokenResponse {
+            status: PollStatus::Failed,
+            token: None,
+            error_code: Some("unknown_response".to_string()),
+            error_description: Some("未从响应中识别出有效 Token 或标准错误".to_string()),
+        })
     }
 
-    // 删除磁盘文件
-    let file_path = get_auth_file_path(&app_handle)?;
-    if file_path.exists() {
-        let _ = fs::remove_file(file_path);
+    /// Command 3: 手动保存 Token
+    #[tauri::command]
+    pub fn save_token(
+        token: AuthToken,
+        app_handle: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        save_token_internal(&app_handle, &state, token)
     }
 
-    Ok(())
-}
-
-/// Command 6: 异步拉起全局 Gemini CLI 任务并实时推送到前端
-#[tauri::command]
-pub async fn execute_gemini_task(
-    window: tauri::Window,
-    prompt: String,
-    current_workspace: Option<String>,
-    task_id: Option<String>,
-) -> Result<(), String> {
-    let tid = task_id.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis().to_string())
-            .unwrap_or_else(|_| "task_0".to_string())
-    });
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = tokio::process::Command::new("cmd");
-    #[cfg(target_os = "windows")]
-    cmd.args(["/C", "gemini", &prompt]);
-
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = tokio::process::Command::new("gemini");
-    #[cfg(not(target_os = "windows"))]
-    cmd.arg(&prompt);
-
-    // 继承完整环境变量
-    for (k, v) in std::env::vars() {
-        cmd.env(k, v);
-    }
-
-    // 切换到用户当前工作区路径
-    if let Some(ref ws) = current_workspace {
-        if !ws.trim().is_empty() {
-            let path = PathBuf::from(ws);
-            if path.exists() && path.is_dir() {
-                cmd.current_dir(path);
+    /// Command 4: 读取持久化的 AuthToken
+    #[tauri::command]
+    pub fn load_token(
+        app_handle: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<Option<AuthToken>, String> {
+        if let Ok(store) = state.token.lock() {
+            if let Some(ref token) = *store {
+                return Ok(Some(token.clone()));
             }
         }
+
+        let file_path = get_auth_file_path(&app_handle)?;
+        if file_path.exists() {
+            let content = fs::read_to_string(&file_path)
+                .map_err(|e| format!("读取凭证文件失败: {}", e))?;
+
+            let token: AuthToken = serde_json::from_str(&content)
+                .map_err(|e| format!("解析凭证文件失败: {}", e))?;
+
+            if let Ok(mut store) = state.token.lock() {
+                *store = Some(token.clone());
+            }
+
+            return Ok(Some(token));
+        }
+
+        Ok(None)
     }
 
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = window.emit(
-                "gemini-stream",
-                GeminiStreamPayload {
-                    task_id: tid.clone(),
-                    chunk: format!("无法拉起系统 gemini 命令，请检查 CLI 是否配置全路径或已加入 PATH: {}\n", e),
-                    is_done: true,
-                    is_error: true,
-                },
-            );
-            return Err(format!("拉起 Gemini 失败: {}", e));
+    /// Command 5: 清除已保存的 AuthToken
+    #[tauri::command]
+    pub fn clear_token(
+        app_handle: AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        if let Ok(mut store) = state.token.lock() {
+            *store = None;
         }
-    };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+        let file_path = get_auth_file_path(&app_handle)?;
+        if file_path.exists() {
+            let _ = fs::remove_file(file_path);
+        }
 
-    let window_stdout = window.clone();
-    let tid_stdout = tid.clone();
+        Ok(())
+    }
 
-    let stdout_handle = tokio::spawn(async move {
-        if let Some(stdout) = stdout {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let cleaned_line = strip_ansi_codes(&line);
-                let _ = window_stdout.emit(
+    /// Command 6: 异步拉起全局 Gemini CLI 任务并实时推送到前端
+    #[tauri::command]
+    pub async fn execute_gemini_task(
+        window: tauri::Window,
+        prompt: String,
+        current_workspace: Option<String>,
+        task_id: Option<String>,
+    ) -> Result<(), String> {
+        let tid = task_id.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or_else(|_| "task_0".to_string())
+        });
+
+        #[cfg(target_os = "windows")]
+        let mut cmd = tokio::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        cmd.args(["/C", "gemini", &prompt]);
+
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = tokio::process::Command::new("gemini");
+        #[cfg(not(target_os = "windows"))]
+        cmd.arg(&prompt);
+
+        for (k, v) in std::env::vars() {
+            cmd.env(k, v);
+        }
+
+        if let Some(ref ws) = current_workspace {
+            if !ws.trim().is_empty() {
+                let path = PathBuf::from(ws);
+                if path.exists() && path.is_dir() {
+                    cmd.current_dir(path);
+                }
+            }
+        }
+
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = window.emit(
                     "gemini-stream",
                     GeminiStreamPayload {
-                        task_id: tid_stdout.clone(),
-                        chunk: format!("{}\n", cleaned_line),
-                        is_done: false,
-                        is_error: false,
+                        task_id: tid.clone(),
+                        chunk: format!("无法拉起系统 gemini 命令，请检查 CLI 是否已加入 PATH: {}\n", e),
+                        is_done: true,
+                        is_error: true,
                     },
                 );
+                return Err(format!("拉起 Gemini 失败: {}", e));
             }
-        }
-    });
+        };
 
-    let window_stderr = window.clone();
-    let tid_stderr = tid.clone();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-    let stderr_handle = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let cleaned_line = strip_ansi_codes(&line);
-                if !cleaned_line.trim().is_empty() {
-                    let _ = window_stderr.emit(
+        let window_stdout = window.clone();
+        let tid_stdout = tid.clone();
+
+        let stdout_handle = tokio::spawn(async move {
+            if let Some(stdout) = stdout {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let cleaned_line = strip_ansi_codes(&line);
+                    let _ = window_stdout.emit(
                         "gemini-stream",
                         GeminiStreamPayload {
-                            task_id: tid_stderr.clone(),
+                            task_id: tid_stdout.clone(),
                             chunk: format!("{}\n", cleaned_line),
                             is_done: false,
-                            is_error: true,
+                            is_error: false,
                         },
                     );
                 }
             }
-        }
-    });
+        });
 
-    let _ = tokio::join!(stdout_handle, stderr_handle);
-    let status = child.wait().await.map_err(|e| format!("进程等待发生错误: {}", e))?;
+        let window_stderr = window.clone();
+        let tid_stderr = tid.clone();
 
-    let _ = window.emit(
-        "gemini-stream",
-        GeminiStreamPayload {
-            task_id: tid,
-            chunk: "".to_string(),
-            is_done: true,
-            is_error: !status.success(),
-        },
-    );
+        let stderr_handle = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let cleaned_line = strip_ansi_codes(&line);
+                    if !cleaned_line.trim().is_empty() {
+                        let _ = window_stderr.emit(
+                            "gemini-stream",
+                            GeminiStreamPayload {
+                                task_id: tid_stderr.clone(),
+                                chunk: format!("{}\n", cleaned_line),
+                                is_done: false,
+                                is_error: true,
+                            },
+                        );
+                    }
+                }
+            }
+        });
 
-    Ok(())
+        let _ = tokio::join!(stdout_handle, stderr_handle);
+        let status = child.wait().await.map_err(|e| format!("进程等待发生错误: {}", e))?;
+
+        let _ = window.emit(
+            "gemini-stream",
+            GeminiStreamPayload {
+                task_id: tid,
+                chunk: "".to_string(),
+                is_done: true,
+                is_error: !status.success(),
+            },
+        );
+
+        Ok(())
+    }
 }
 
 /// Tauri 应用入口与指令挂载
@@ -458,12 +448,12 @@ pub fn run() {
             token: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
-            request_device_code,
-            poll_for_token,
-            save_token,
-            load_token,
-            clear_token,
-            execute_gemini_task
+            commands::request_device_code,
+            commands::poll_for_token,
+            commands::save_token,
+            commands::load_token,
+            commands::clear_token,
+            commands::execute_gemini_task
         ])
         .run(tauri::generate_context!())
         .expect("启动 Celatura 桌面端进程发生严重错误");
