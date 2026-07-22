@@ -15,6 +15,13 @@ pub struct GeminiStreamPayload {
     pub is_error: bool,
 }
 
+/// 用户自定义 Google OAuth 客户端凭证结构
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ClientCredentials {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
 /// 高效过滤 ANSI 终端颜色转义字符
 fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -36,10 +43,6 @@ fn strip_ansi_codes(input: &str) -> String {
     }
     result
 }
-
-// 默认 Google Cloud Client 配置
-const DEFAULT_CLIENT_ID: &str = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
-const DEFAULT_CLIENT_SECRET: &str = "YOUR_GOOGLE_CLIENT_SECRET";
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -73,7 +76,7 @@ pub struct AppState {
     pub token: Mutex<Option<AuthToken>>,
 }
 
-/// 辅助函数：获取本地配置文件路径
+/// 辅助函数：获取身份凭证配置文件路径
 fn get_auth_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let config_dir = app_handle
         .path()
@@ -87,7 +90,21 @@ fn get_auth_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     Ok(config_dir.join("auth_token.json"))
 }
 
-/// 内部辅助：保存凭证至文件与全局 State
+/// 辅助函数：获取用户 OAuth 客户端配置路径
+fn get_credentials_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("获取应用配置目录失败: {}", e))?;
+
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
+    }
+
+    Ok(config_dir.join("client_credentials.json"))
+}
+
+/// 内部辅助：保存 Token 凭证至文件与全局 State
 fn save_token_internal(
     app_handle: &AppHandle,
     state: &State<'_, AppState>,
@@ -115,7 +132,44 @@ fn url_encode(input: &str) -> String {
 pub mod commands {
     use super::*;
 
-    /// Command 1: 本地 OAuth2 回调 HTTP 服务与浏览器唤起
+    /// Command 1: 保存用户自定义 Google Client ID 与 Client Secret
+    #[tauri::command]
+    pub fn save_client_credentials(
+        client_id: String,
+        client_secret: String,
+        app_handle: AppHandle,
+    ) -> Result<(), String> {
+        let creds = ClientCredentials {
+            client_id: client_id.trim().to_string(),
+            client_secret: client_secret.trim().to_string(),
+        };
+        let file_path = get_credentials_file_path(&app_handle)?;
+        let json_data = serde_json::to_string_pretty(&creds)
+            .map_err(|e| format!("序列化 OAuth 客户端配置失败: {}", e))?;
+
+        fs::write(file_path, json_data).map_err(|e| format!("保存 OAuth 客户端配置文件失败: {}", e))?;
+        Ok(())
+    }
+
+    /// Command 2: 读取用户自定义的 Google OAuth 客户端配置
+    #[tauri::command]
+    pub fn load_client_credentials(
+        app_handle: AppHandle,
+    ) -> Result<Option<ClientCredentials>, String> {
+        let file_path = get_credentials_file_path(&app_handle)?;
+        if file_path.exists() {
+            let content = fs::read_to_string(&file_path)
+                .map_err(|e| format!("读取 OAuth 客户端配置文件失败: {}", e))?;
+
+            let creds: ClientCredentials = serde_json::from_str(&content)
+                .map_err(|e| format!("解析 OAuth 客户端配置文件失败: {}", e))?;
+
+            return Ok(Some(creds));
+        }
+        Ok(None)
+    }
+
+    /// Command 3: 本地 OAuth2 回调 HTTP 服务与浏览器唤起（动态读取自定义凭证）
     #[tauri::command]
     pub async fn start_google_oauth(
         window: tauri::Window,
@@ -124,8 +178,18 @@ pub mod commands {
         app_handle: AppHandle,
         _state: State<'_, AppState>,
     ) -> Result<String, String> {
-        let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
-        let csecret = client_secret.unwrap_or_else(|| DEFAULT_CLIENT_SECRET.to_string());
+        // 从本地磁盘自动检索用户保存的客户端凭证
+        let saved_creds = load_client_credentials(app_handle.clone()).unwrap_or(None);
+
+        let cid = client_id
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| saved_creds.as_ref().map(|c| c.client_id.clone()))
+            .ok_or_else(|| "未检测到有效的 Google Client ID，请先在界面配置并点击保存凭证！".to_string())?;
+
+        let csecret = client_secret
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| saved_creds.as_ref().map(|c| c.client_secret.clone()))
+            .ok_or_else(|| "未检测到有效的 Google Client Secret，请先在界面配置并点击保存凭证！".to_string())?;
 
         // 1. 启动本地 127.0.0.1 随机端口 HTTP 服务器
         let server = tiny_http::Server::http("127.0.0.1:0")
@@ -138,7 +202,7 @@ pub mod commands {
 
         let redirect_uri = format!("http://127.0.0.1:{}", port);
 
-        // 2. 构造标准网页 OAuth 授权 URL
+        // 2. 构造标准网页 OAuth2 授权 URL
         let auth_url = format!(
             "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
             GOOGLE_AUTH_URL,
@@ -147,7 +211,7 @@ pub mod commands {
             url_encode(DEFAULT_SCOPE)
         );
 
-        // 3. 唤起默认系统浏览器
+        // 3. 唤起系统默认浏览器
         let _ = tauri_plugin_opener::open_url(&auth_url, None::<&str>);
 
         let app_handle_clone = app_handle.clone();
@@ -220,7 +284,6 @@ pub mod commands {
                                                 created_at: now_sec,
                                             };
 
-                                            // 写入 AppState 和磁盘持久化
                                             if let Some(state_app) = app_handle_clone.try_state::<AppState>() {
                                                 let _ = save_token_internal(&app_handle_clone, &state_app, auth_token.clone());
                                             }
@@ -242,7 +305,7 @@ pub mod commands {
         Ok(redirect_uri)
     }
 
-    /// Command 2: 手动保存 Token
+    /// Command 4: 手动保存 AuthToken
     #[tauri::command]
     pub fn save_token(
         token: AuthToken,
@@ -252,7 +315,7 @@ pub mod commands {
         save_token_internal(&app_handle, &state, token)
     }
 
-    /// Command 3: 读取持久化的 AuthToken
+    /// Command 5: 读取持久化的 AuthToken
     #[tauri::command]
     pub fn load_token(
         app_handle: AppHandle,
@@ -282,7 +345,7 @@ pub mod commands {
         Ok(None)
     }
 
-    /// Command 4: 清除已保存的 AuthToken
+    /// Command 6: 清除已保存的 AuthToken
     #[tauri::command]
     pub fn clear_token(
         app_handle: AppHandle,
@@ -300,7 +363,7 @@ pub mod commands {
         Ok(())
     }
 
-    /// Command 5: 异步拉起全局 Gemini CLI 任务并实时推送到前端
+    /// Command 7: 异步拉起全局 Gemini CLI 任务并实时推送到前端
     #[tauri::command]
     pub async fn execute_gemini_task(
         window: tauri::Window,
@@ -433,6 +496,8 @@ pub fn run() {
             token: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
+            commands::save_client_credentials,
+            commands::load_client_credentials,
             commands::start_google_oauth,
             commands::save_token,
             commands::load_token,
