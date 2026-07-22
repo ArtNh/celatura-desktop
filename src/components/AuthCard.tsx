@@ -6,7 +6,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { KeyRound, Copy, Check, ExternalLink, RefreshCw, Shield, ArrowRight, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-interface DeviceCodeData {
+export interface DeviceCodeData {
   device_code: string;
   user_code: string;
   verification_url: string;
@@ -14,36 +14,38 @@ interface DeviceCodeData {
   interval: number;
 }
 
-interface AuthToken {
+export interface AuthToken {
   access_token: string;
   refresh_token?: string;
   expires_in?: number;
 }
 
-interface PollTokenResponse {
+export interface PollTokenResponse {
   status: 'success' | 'pending' | 'slow_down' | 'access_denied' | 'expired_token' | 'failed';
   token?: AuthToken;
   error_code?: string;
   error_description?: string;
 }
 
-interface AuthCardProps {
+export interface AuthCardProps {
   onSuccess: (token: AuthToken) => void;
   onAuthStateChange?: (isAuthenticating: boolean) => void;
 }
 
-export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange }) => {
+export const AuthCard: React.FC<AuthCardProps> = ({
+  onSuccess,
+  onAuthStateChange,
+}: AuthCardProps): React.JSX.Element => {
   const [loading, setLoading] = useState<boolean>(false);
   const [deviceData, setDeviceData] = useState<DeviceCodeData | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isPolling, setIsPolling] = useState<boolean>(false);
 
-  // 防内存泄漏 refs
-  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // 防内存泄漏 refs (跨环境类型兼容)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef = useRef<boolean>(true);
 
-  // 挂载/卸载生命周期管理
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
@@ -55,14 +57,11 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
     };
   }, []);
 
-  // 1. 发起向后端获取设备授权码的请求
   const handleStartAuth = async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
-      const data = await invoke<DeviceCodeData>('request_device_code', {
-        clientId: null,
-      });
+      const data = await invoke<DeviceCodeData>('request_device_code', { clientId: null });
       if (isMountedRef.current) {
         setDeviceData(data);
         setIsPolling(true);
@@ -73,13 +72,10 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
         setErrorMsg(typeof err === 'string' ? err : '获取谷歌授权码失败，请检查网络代理设置');
       }
     } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-      }
+      if (isMountedRef.current) setLoading(false);
     }
   };
 
-  // 2. 复制授权码至系统剪贴板
   const handleCopyCode = () => {
     if (!deviceData) return;
     navigator.clipboard.writeText(deviceData.user_code);
@@ -89,7 +85,6 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
     }, 2000);
   };
 
-  // 3. 打开 Win10/macOS 系统默认浏览器
   const handleOpenBrowser = async () => {
     if (!deviceData) return;
     try {
@@ -99,10 +94,8 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
     }
   };
 
-  // 4. 后台安全轮询 Token 端点 (严格销毁防内存泄漏)
   useEffect(() => {
     if (!isPolling || !deviceData) return;
-
     let currentInterval = Math.max(deviceData.interval || 5, 5) * 1000;
 
     const poll = async () => {
@@ -143,7 +136,6 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
           return;
         }
 
-        // 保持轮询 (authorization_pending 或 slow_down)
         if (isMountedRef.current && isPolling) {
           pollTimerRef.current = setTimeout(poll, currentInterval);
         }
@@ -155,7 +147,6 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
     };
 
     pollTimerRef.current = setTimeout(poll, currentInterval);
-
     return () => {
       if (pollTimerRef.current) {
         clearTimeout(pollTimerRef.current);
@@ -166,30 +157,17 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
 
   return (
     <div className="flex-1 h-full bg-background flex items-center justify-center p-6 select-none relative overflow-hidden">
-      {/* 背景深邃微光 */}
-      <div className="absolute -top-40 -right-40 w-96 h-96 bg-brand-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-brand-accent/10 rounded-full blur-3xl pointer-events-none" />
-
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35 }}
-        className="w-full max-w-md glass-card rounded-2xl p-8 shadow-2xl relative z-10 animate-shimmer-pulse"
-      >
-        {/* 卡片头部 */}
+      <div className="w-full max-w-md glass-card rounded-2xl p-8 shadow-2xl relative z-10 animate-shimmer-pulse">
         <div className="text-center space-y-3 mb-8">
-          <div className="inline-flex p-3 rounded-xl bg-brand-500/10 border border-brand-500/20 text-brand-500 mb-1 shadow-inner">
+          <div className="inline-flex p-3 rounded-xl bg-brand-500/10 border border-brand-500/20 text-brand-500 mb-1">
             <KeyRound className="w-6 h-6" />
           </div>
-          <h2 className="text-xl font-semibold tracking-tight text-gray-100">
-            绑定 Google 账号凭证
-          </h2>
+          <h2 className="text-xl font-semibold tracking-tight text-gray-100">绑定 Google 账号凭证</h2>
           <p className="text-xs text-gray-400 max-w-sm mx-auto leading-relaxed">
-            无需手动填写 Gemini API Key。采用 Google 官方 Device Authorization Grant，凭证全部持久化留存于本地 Rust 安全层。
+            无需手动填写 Gemini API Key。采用 Google 官方 Device Authorization Grant，凭证留存于本地 Rust 安全层。
           </p>
         </div>
 
-        {/* 错误通知 */}
         {errorMsg && (
           <div className="mb-6 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center space-x-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
@@ -197,17 +175,9 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
           </div>
         )}
 
-        {/* 交互主体 */}
         <AnimatePresence mode="wait">
           {!deviceData ? (
-            /* 未开启绑定 */
-            <motion.div
-              key="start"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="space-y-4"
-            >
+            <motion.div key="start" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-4">
               <button
                 onClick={handleStartAuth}
                 disabled={loading}
@@ -225,74 +195,45 @@ export const AuthCard: React.FC<AuthCardProps> = ({ onSuccess, onAuthStateChange
                   </>
                 )}
               </button>
-
               <div className="flex items-center justify-center space-x-2 text-[11px] text-gray-500 pt-2">
                 <Shield className="w-3.5 h-3.5" />
                 <span>不经过任何第三方中转，去 Web 服务器设计</span>
               </div>
             </motion.div>
           ) : (
-            /* 授权码就绪与等待状态 */
-            <motion.div
-              key="code"
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0 }}
-              className="space-y-6"
-            >
-              {/* 超大字号高亮 User Code */}
+            <motion.div key="code" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} className="space-y-6">
               <div className="space-y-2 text-center">
-                <div className="text-[11px] font-medium text-gray-400 uppercase tracking-wider">
-                  您的设备授权码
-                </div>
+                <div className="text-[11px] font-medium text-gray-400 uppercase tracking-wider">您的设备授权码</div>
                 <div className="flex items-center justify-center space-x-3 bg-surface-hover/80 border border-surface-border p-4 rounded-xl shadow-inner">
                   <span className="font-mono text-3xl font-bold tracking-widest text-brand-500 select-all">
                     {deviceData.user_code}
                   </span>
-                  <button
-                    onClick={handleCopyCode}
-                    className="p-2.5 rounded-lg bg-surface border border-surface-border hover:bg-surface-border text-gray-300 transition-colors active:scale-95"
-                    title="复制授权码"
-                  >
+                  <button onClick={handleCopyCode} className="p-2.5 rounded-lg bg-surface border border-surface-border hover:bg-surface-border text-gray-300 transition-colors active:scale-95">
                     {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
 
-              {/* 唤起默认浏览器 */}
               <div className="space-y-3">
-                <button
-                  onClick={handleOpenBrowser}
-                  className="w-full py-3 px-4 rounded-xl bg-surface-hover hover:bg-surface-border text-gray-100 border border-surface-border font-medium text-sm transition-all flex items-center justify-center space-x-2 active:scale-[0.99]"
-                >
+                <button onClick={handleOpenBrowser} className="w-full py-3 px-4 rounded-xl bg-surface-hover hover:bg-surface-border text-gray-100 border border-surface-border font-medium text-sm transition-all flex items-center justify-center space-x-2 active:scale-[0.99]">
                   <span>打卡浏览器完成授权</span>
                   <ExternalLink className="w-4 h-4" />
                 </button>
-
-                {/* 流式 Loading 指示器 */}
                 <div className="flex items-center justify-center space-x-2.5 py-2 text-xs text-gray-400">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-brand-500" />
                   <span>正在等待 Google 账号授权认证...</span>
                 </div>
               </div>
 
-              {/* 重置 */}
               <div className="text-center pt-2">
-                <button
-                  onClick={() => {
-                    setDeviceData(null);
-                    setIsPolling(false);
-                    onAuthStateChange?.(false);
-                  }}
-                  className="text-xs text-gray-500 hover:text-gray-300 underline underline-offset-4"
-                >
+                <button onClick={() => { setDeviceData(null); setIsPolling(false); onAuthStateChange?.(false); }} className="text-xs text-gray-500 hover:text-gray-300 underline underline-offset-4">
                   取消并重新获取
                 </button>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
-      </motion.div>
+      </div>
     </div>
   );
 };

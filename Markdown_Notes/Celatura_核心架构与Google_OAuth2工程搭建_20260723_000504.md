@@ -76,6 +76,15 @@
 > 3. 精细重构 `ChatStreamView.tsx`：建立包含 Gemini 1.5 Pro 选择器与圆角多模态输入框的主对话流。
 > 4. 精细重构 `page.tsx`：全局控制中心，挂载自动调用 `load_token` 解析凭证并无缝渲染视图。
 
+---
+
+### [2026-07-23 00:27:15] 前端依赖 Node_Modules 完备构建与 TypeScript 强类型增强
+
+> **更新说明**：
+> 1. 全量执行 `npm install`，成功安装并补全包括 `react`, `@types/react`, `@tauri-apps/api`, `@tauri-apps/plugin-opener`, `lucide-react`, `framer-motion` 在内的 117 个前端声明模块。
+> 2. 为 `page.tsx`, `AuthCard.tsx`, `ChatStreamView.tsx`, `Sidebar.tsx` 全量添加显式 TypeScript 类型注解（包含事件 `React.ChangeEvent`, `React.KeyboardEvent`, 返回值 `React.JSX.Element` 及防泄漏定时器类型 `ReturnType<typeof setTimeout>`）。
+
+
 
 
 

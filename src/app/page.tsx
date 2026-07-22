@@ -6,12 +6,11 @@ import { Sidebar } from '@/components/Sidebar';
 import { AuthCard } from '@/components/AuthCard';
 import { ChatStreamView } from '@/components/ChatStreamView';
 
-export default function Home() {
+export default function Home(): React.JSX.Element {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isAuthenticating, setIsAuthenticating] = useState<boolean>(false);
   const [activeSessionId, setActiveSessionId] = useState<string>('1');
 
-  // 组件挂载时自动调用后端 Command 读取本地持久化凭证
   useEffect(() => {
     const initCheckToken = async () => {
       try {
@@ -44,7 +43,7 @@ export default function Home() {
         onLogout={handleLogout}
         onNewChat={() => setActiveSessionId(Date.now().toString())}
         activeSessionId={activeSessionId}
-        onSelectSession={(id) => setActiveSessionId(id)}
+        onSelectSession={(id: string) => setActiveSessionId(id)}
       />
 
       {/* 右侧主工作区：未登录渲染 AuthCard，已登录进入 ChatStreamView */}
@@ -56,7 +55,7 @@ export default function Home() {
             setIsAuthenticated(true);
             setIsAuthenticating(false);
           }}
-          onAuthStateChange={(authenticating) => setIsAuthenticating(authenticating)}
+          onAuthStateChange={(authenticating: boolean) => setIsAuthenticating(authenticating)}
         />
       )}
     </main>

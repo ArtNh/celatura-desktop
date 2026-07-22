@@ -3,7 +3,7 @@
 import React from 'react';
 import { MessageSquare, Plus, ShieldCheck, ShieldAlert, RefreshCw, LogOut, Settings, Cpu } from 'lucide-react';
 
-interface SidebarProps {
+export interface SidebarProps {
   isAuthenticated: boolean;
   isAuthenticating?: boolean;
   userEmail?: string;
@@ -21,8 +21,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onNewChat,
   activeSessionId,
   onSelectSession,
-}) => {
-  // 模拟任务历史列表
+}: SidebarProps): React.JSX.Element => {
   const mockSessions = [
     { id: '1', title: 'Rust reqwest 网络层安全架构设计', time: '10分钟前' },
     { id: '2', title: 'Google OAuth 设备授权流程原理解析', time: '2小时前' },
@@ -31,9 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside className="w-72 h-full bg-surface border-r border-surface-border flex flex-col justify-between select-none">
-      {/* 顶部品牌与控制区 */}
       <div className="p-4 space-y-4">
-        {/* 品牌 Icon 与标题 */}
         <div className="flex items-center space-x-3 px-2 py-1">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-brand-600 to-brand-accent flex items-center justify-center shadow-lg shadow-brand-500/20">
             <Cpu className="w-4 h-4 text-white" />
@@ -44,7 +41,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* 新建任务对话按钮 */}
         <button
           onClick={onNewChat}
           className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-medium text-xs transition-all shadow-md shadow-brand-600/10 active:scale-[0.98]"
@@ -53,7 +49,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <span>新建对话任务</span>
         </button>
 
-        {/* 会话历史列表 */}
         <div className="pt-2">
           <div className="px-2 pb-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
             对话任务历史
@@ -80,12 +75,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
-      {/* 底部鉴权状态与系统操作 */}
       <div className="p-4 border-t border-surface-border/60 bg-surface/50 space-y-3">
         {/* 三态认证指示灯卡片 */}
         <div className="px-3 py-2.5 rounded-lg bg-surface-hover/40 border border-surface-border/40 flex items-center justify-between">
           <div className="flex items-center space-x-2.5 overflow-hidden">
-            {/* 状态灯判定：未登录为红/琥珀色，登录中为旋转黄色指示灯，已登录为青绿指示灯 */}
             {isAuthenticating ? (
               <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
             ) : isAuthenticated ? (
@@ -116,12 +109,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* 底部功能菜单 */}
         <div className="flex items-center justify-between pt-1">
-          <button
-            className="p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors"
-            title="系统首选项设置"
-          >
+          <button className="p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors">
             <Settings className="w-4 h-4" />
           </button>
           {isAuthenticated && (
