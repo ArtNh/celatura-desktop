@@ -37,25 +37,15 @@ fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
-// 默认 Google Cloud Client 配置（可通过环境或设置传入覆盖）
+// 默认 Google Cloud Client 配置
 const DEFAULT_CLIENT_ID: &str = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
 const DEFAULT_CLIENT_SECRET: &str = "YOUR_GOOGLE_CLIENT_SECRET";
 
-const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
+const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/generative-language https://www.googleapis.com/auth/cloud-platform";
 
-/// 1. 谷歌设备授权码响应结构
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
-/// 2. 身份凭证存储结构
+/// 身份凭证存储结构
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AuthToken {
     pub access_token: String,
@@ -64,27 +54,6 @@ pub struct AuthToken {
     pub token_type: Option<String>,
     pub scope: Option<String>,
     pub created_at: u64,
-}
-
-/// 3. Token 轮询响应结构（包含多态错误匹配机制）
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PollTokenResponse {
-    pub status: PollStatus,
-    pub token: Option<AuthToken>,
-    pub error_code: Option<String>,
-    pub error_description: Option<String>,
-}
-
-/// 轮询状态枚举
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PollStatus {
-    Success,
-    Pending,
-    SlowDown,
-    AccessDenied,
-    ExpiredToken,
-    Failed,
 }
 
 /// 谷歌 API Raw 响应结构体
@@ -136,128 +105,144 @@ fn save_token_internal(
     Ok(())
 }
 
+fn url_encode(input: &str) -> String {
+    url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
+}
+
 // ============================================================================
-// Tauri Commands 模块定义 (隔离命令命名空间)
+// Tauri Commands 模块定义
 // ============================================================================
 pub mod commands {
     use super::*;
 
-    /// Command 1: 向谷歌设备端点请求设备授权码
+    /// Command 1: 本地 OAuth2 回调 HTTP 服务与浏览器唤起
     #[tauri::command]
-    pub async fn request_device_code(
-        client_id: Option<String>,
-    ) -> Result<DeviceCodeResponse, String> {
-        let client = reqwest::Client::new();
-        let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
-
-        let params = [
-            ("client_id", cid.as_str()),
-            ("scope", DEFAULT_SCOPE),
-        ];
-
-        let res = client
-            .post(GOOGLE_DEVICE_CODE_URL)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| format!("网络请求失败，请检查代理设置: {}", e))?;
-
-        if !res.status().is_success() {
-            let err_text = res.text().await.unwrap_or_default();
-            return Err(format!("谷歌 OAuth 设备端点异常: {}", err_text));
-        }
-
-        let device_resp = res
-            .json::<DeviceCodeResponse>()
-            .await
-            .map_err(|e| format!("解析设备码数据失败: {}", e))?;
-
-        Ok(device_resp)
-    }
-
-    /// Command 2: 轮询谷歌 Token 端点并精准匹配错误码
-    #[tauri::command]
-    pub async fn poll_for_token(
-        device_code: String,
+    pub async fn start_google_oauth(
+        window: tauri::Window,
         client_id: Option<String>,
         client_secret: Option<String>,
         app_handle: AppHandle,
-        state: State<'_, AppState>,
-    ) -> Result<PollTokenResponse, String> {
-        let client = reqwest::Client::new();
+        _state: State<'_, AppState>,
+    ) -> Result<String, String> {
         let cid = client_id.unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
         let csecret = client_secret.unwrap_or_else(|| DEFAULT_CLIENT_SECRET.to_string());
 
-        let params = [
-            ("client_id", cid.as_str()),
-            ("client_secret", csecret.as_str()),
-            ("device_code", device_code.as_str()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ];
+        // 1. 启动本地 127.0.0.1 随机端口 HTTP 服务器
+        let server = tiny_http::Server::http("127.0.0.1:0")
+            .map_err(|e| format!("无法启动本地回调 HTTP 服务: {}", e))?;
 
-        let res = client
-            .post(GOOGLE_TOKEN_URL)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| format!("Token 轮询网络异常: {}", e))?;
-
-        let raw_resp = res
-            .json::<RawGoogleTokenResponse>()
-            .await
-            .map_err(|e| format!("Token 响应解析失败: {}", e))?;
-
-        if let Some(access_token) = raw_resp.access_token {
-            let now_sec = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let auth_token = AuthToken {
-                access_token,
-                refresh_token: raw_resp.refresh_token,
-                expires_in: raw_resp.expires_in,
-                token_type: raw_resp.token_type,
-                scope: raw_resp.scope,
-                created_at: now_sec,
-            };
-
-            let _ = save_token_internal(&app_handle, &state, auth_token.clone());
-
-            return Ok(PollTokenResponse {
-                status: PollStatus::Success,
-                token: Some(auth_token),
-                error_code: None,
-                error_description: None,
-            });
+        let port = server.server_addr().to_ip().map(|addr| addr.port()).unwrap_or(0);
+        if port == 0 {
+            return Err("分配本地随机端口失败".to_string());
         }
 
-        if let Some(ref err_str) = raw_resp.error {
-            let status = match err_str.as_str() {
-                "authorization_pending" => PollStatus::Pending,
-                "slow_down" => PollStatus::SlowDown,
-                "access_denied" => PollStatus::AccessDenied,
-                "expired_token" => PollStatus::ExpiredToken,
-                _ => PollStatus::Failed,
-            };
+        let redirect_uri = format!("http://127.0.0.1:{}", port);
 
-            return Ok(PollTokenResponse {
-                status,
-                token: None,
-                error_code: Some(err_str.clone()),
-                error_description: raw_resp.error_description,
-            });
-        }
+        // 2. 构造标准网页 OAuth 授权 URL
+        let auth_url = format!(
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
+            GOOGLE_AUTH_URL,
+            url_encode(&cid),
+            url_encode(&redirect_uri),
+            url_encode(DEFAULT_SCOPE)
+        );
 
-        Ok(PollTokenResponse {
-            status: PollStatus::Failed,
-            token: None,
-            error_code: Some("unknown_response".to_string()),
-            error_description: Some("未从响应中识别出有效 Token 或标准错误".to_string()),
-        })
+        // 3. 唤起默认系统浏览器
+        let _ = tauri_plugin_opener::open_url(&auth_url, None::<&str>);
+
+        let app_handle_clone = app_handle.clone();
+        let redirect_uri_cb = redirect_uri.clone();
+
+        // 4. 后台线程监听重定向回调
+        tokio::task::spawn_blocking(move || {
+            if let Ok(Some(request)) = server.recv_timeout(std::time::Duration::from_secs(300)) {
+                let req_url = format!("http://localhost{}", request.url());
+                if let Ok(parsed_url) = url::Url::parse(&req_url) {
+                    let code_opt = parsed_url
+                        .query_pairs()
+                        .find(|(k, _)| k == "code")
+                        .map(|(_, v)| v.to_string());
+
+                    if let Some(code) = code_opt {
+                        let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Celatura - 授权成功</title>
+    <style>
+        body { background-color: #0d0e11; color: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: rgba(17, 19, 26, 0.9); border: 1px solid rgba(59, 130, 246, 0.3); padding: 40px; border-radius: 20px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        h1 { color: #60a5fa; margin-bottom: 12px; font-size: 24px; }
+        p { color: #9ca3af; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Google 账号授权成功</h1>
+        <p>凭证已安全建立，您可以关闭此浏览器标签页并返回 Celatura 桌面客户端。</p>
+    </div>
+</body>
+</html>"#;
+                        let response = tiny_http::Response::from_string(html)
+                            .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap());
+                        let _ = request.respond(response);
+
+                        // 异步换取 Token
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+
+                        if let Ok(rt) = runtime {
+                            rt.block_on(async {
+                                let client = reqwest::Client::new();
+                                let params = [
+                                    ("client_id", cid.as_str()),
+                                    ("client_secret", csecret.as_str()),
+                                    ("code", code.as_str()),
+                                    ("grant_type", "authorization_code"),
+                                    ("redirect_uri", redirect_uri_cb.as_str()),
+                                ];
+
+                                if let Ok(res) = client.post(GOOGLE_TOKEN_URL).form(&params).send().await {
+                                    if let Ok(raw_resp) = res.json::<RawGoogleTokenResponse>().await {
+                                        if let Some(access_token) = raw_resp.access_token {
+                                            let now_sec = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0);
+
+                                            let auth_token = AuthToken {
+                                                access_token,
+                                                refresh_token: raw_resp.refresh_token,
+                                                expires_in: raw_resp.expires_in,
+                                                token_type: raw_resp.token_type,
+                                                scope: raw_resp.scope,
+                                                created_at: now_sec,
+                                            };
+
+                                            // 写入 AppState 和磁盘持久化
+                                            if let Some(state_app) = app_handle_clone.try_state::<AppState>() {
+                                                let _ = save_token_internal(&app_handle_clone, &state_app, auth_token.clone());
+                                            }
+
+                                            let _ = window.emit("oauth-success", auth_token);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    } else {
+                        let response = tiny_http::Response::from_string("授权失败: 未包含 code 参数");
+                        let _ = request.respond(response);
+                    }
+                }
+            }
+        });
+
+        Ok(redirect_uri)
     }
 
-    /// Command 3: 手动保存 Token
+    /// Command 2: 手动保存 Token
     #[tauri::command]
     pub fn save_token(
         token: AuthToken,
@@ -267,7 +252,7 @@ pub mod commands {
         save_token_internal(&app_handle, &state, token)
     }
 
-    /// Command 4: 读取持久化的 AuthToken
+    /// Command 3: 读取持久化的 AuthToken
     #[tauri::command]
     pub fn load_token(
         app_handle: AppHandle,
@@ -297,7 +282,7 @@ pub mod commands {
         Ok(None)
     }
 
-    /// Command 5: 清除已保存的 AuthToken
+    /// Command 4: 清除已保存的 AuthToken
     #[tauri::command]
     pub fn clear_token(
         app_handle: AppHandle,
@@ -315,7 +300,7 @@ pub mod commands {
         Ok(())
     }
 
-    /// Command 6: 异步拉起全局 Gemini CLI 任务并实时推送到前端
+    /// Command 5: 异步拉起全局 Gemini CLI 任务并实时推送到前端
     #[tauri::command]
     pub async fn execute_gemini_task(
         window: tauri::Window,
@@ -448,8 +433,7 @@ pub fn run() {
             token: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
-            commands::request_device_code,
-            commands::poll_for_token,
+            commands::start_google_oauth,
             commands::save_token,
             commands::load_token,
             commands::clear_token,
