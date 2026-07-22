@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Cross-platform Native Gemini AI Desktop Client powered by Tauri 2"
 authors = ["ArtNh"]
 edition = "2021"
+build = "build.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
