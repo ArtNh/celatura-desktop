@@ -8,28 +8,31 @@ import { ChatStreamView } from '@/components/ChatStreamView';
 
 export default function Home() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isAuthenticating, setIsAuthenticating] = useState<boolean>(false);
   const [activeSessionId, setActiveSessionId] = useState<string>('1');
 
-  // 初始化检查本地 Rust 加密栈中的身份凭证
+  // 组件挂载时自动调用后端 Command 读取本地持久化凭证
   useEffect(() => {
-    const checkAuth = async () => {
+    const initCheckToken = async () => {
       try {
-        const state: any = await invoke('get_auth_state');
-        if (state && state.is_authenticated) {
+        const token: any = await invoke('load_token');
+        if (token && token.access_token) {
           setIsAuthenticated(true);
         }
-      } catch (e) {
-        // 开发环境退回安全检查
+      } catch (err) {
+        // 开发环境容错处理
       }
     };
-    checkAuth();
+
+    initCheckToken();
   }, []);
 
   const handleLogout = async () => {
     try {
-      await invoke('logout');
+      await invoke('clear_token');
     } catch (e) {}
     setIsAuthenticated(false);
+    setIsAuthenticating(false);
   };
 
   return (
@@ -37,17 +40,24 @@ export default function Home() {
       {/* 左侧常驻工作台侧边栏 */}
       <Sidebar
         isAuthenticated={isAuthenticated}
+        isAuthenticating={isAuthenticating}
         onLogout={handleLogout}
         onNewChat={() => setActiveSessionId(Date.now().toString())}
         activeSessionId={activeSessionId}
         onSelectSession={(id) => setActiveSessionId(id)}
       />
 
-      {/* 右侧主工作区：未登录展现 AuthCard，已登录展示 ChatStreamView */}
+      {/* 右侧主工作区：未登录渲染 AuthCard，已登录进入 ChatStreamView */}
       {isAuthenticated ? (
         <ChatStreamView key={activeSessionId} />
       ) : (
-        <AuthCard onSuccess={() => setIsAuthenticated(true)} />
+        <AuthCard
+          onSuccess={() => {
+            setIsAuthenticated(true);
+            setIsAuthenticating(false);
+          }}
+          onAuthStateChange={(authenticating) => setIsAuthenticating(authenticating)}
+        />
       )}
     </main>
   );

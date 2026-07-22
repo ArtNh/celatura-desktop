@@ -1,10 +1,11 @@
 'use client';
 
 import React from 'react';
-import { MessageSquare, Plus, ShieldCheck, ShieldAlert, LogOut, Settings, Cpu } from 'lucide-react';
+import { MessageSquare, Plus, ShieldCheck, ShieldAlert, RefreshCw, LogOut, Settings, Cpu } from 'lucide-react';
 
 interface SidebarProps {
   isAuthenticated: boolean;
+  isAuthenticating?: boolean;
   userEmail?: string;
   onLogout: () => void;
   onNewChat: () => void;
@@ -14,6 +15,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({
   isAuthenticated,
+  isAuthenticating = false,
   userEmail,
   onLogout,
   onNewChat,
@@ -80,20 +82,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* 底部鉴权状态与系统操作 */}
       <div className="p-4 border-t border-surface-border/60 bg-surface/50 space-y-3">
-        {/* 鉴权状态卡片 */}
+        {/* 三态认证指示灯卡片 */}
         <div className="px-3 py-2.5 rounded-lg bg-surface-hover/40 border border-surface-border/40 flex items-center justify-between">
           <div className="flex items-center space-x-2.5 overflow-hidden">
-            {isAuthenticated ? (
-              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+            {/* 状态灯判定：未登录为红/琥珀色，登录中为旋转黄色指示灯，已登录为青绿指示灯 */}
+            {isAuthenticating ? (
+              <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+            ) : isAuthenticated ? (
+              <div className="relative flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-75" />
+              </div>
             ) : (
-              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+              <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
             )}
+
             <div className="truncate">
               <div className="text-[11px] font-medium text-gray-300">
-                {isAuthenticated ? 'Google OAuth 已连接' : '身份未绑定'}
+                {isAuthenticating
+                  ? '等待 Google 授权...'
+                  : isAuthenticated
+                  ? 'Google OAuth 已连接'
+                  : '未绑定身份凭证'}
               </div>
               <div className="text-[10px] text-gray-500 truncate">
-                {isAuthenticated ? userEmail || 'Gemini 访问凭证生效中' : '免 API Key 设备授权'}
+                {isAuthenticated
+                  ? userEmail || 'Gemini 原生 Token 就绪'
+                  : isAuthenticating
+                  ? '浏览器打卡中'
+                  : '免 Key 设备授权'}
               </div>
             </div>
           </div>
@@ -101,7 +118,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* 底部功能菜单 */}
         <div className="flex items-center justify-between pt-1">
-          <button className="p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors">
+          <button
+            className="p-2 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors"
+            title="系统首选项设置"
+          >
             <Settings className="w-4 h-4" />
           </button>
           {isAuthenticated && (

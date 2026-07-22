@@ -16,8 +16,8 @@ export const ChatStreamView: React.FC = () => {
     {
       id: '1',
       sender: 'assistant',
-      content: '欢迎使用 Celatura 桌面客户端。谷歌 OAuth 身份凭证已安全建立，当前已就绪，随时精雕您的 AI 对话任务。',
-      timestamp: '00:05',
+      content: '欢迎使用 Celatura 桌面客户端。Google OAuth2 身份凭证已全量加密建立，Tauri 2 Rust 网络架构就绪，请下达对话任务。',
+      timestamp: '00:19',
     },
   ]);
   const [input, setInput] = useState<string>('');
@@ -35,28 +35,28 @@ export const ChatStreamView: React.FC = () => {
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
 
-    // 模拟 Assistant 流式响应
+    // 模拟流式打字机逐字响应
     setTimeout(() => {
       const botMsg: Message = {
         id: (Date.now() + 1).toString(),
         sender: 'assistant',
-        content: `已接收指令："${input}"。Tauri 2 Rust 网络层将全权负责调用 Gemini 原生 API。`,
+        content: `已接收任务指令："${input}"。当前调用的是全量 Gemini 1.5 Pro 模型，所有网络中转由后端 reqwest 独占处理。`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, botMsg]);
-    }, 600);
+    }, 500);
   };
 
   return (
     <div className="flex-1 h-full bg-background flex flex-col justify-between overflow-hidden select-none">
       {/* 顶部模型控制栏 */}
-      <header className="h-14 border-b border-surface-border px-6 flex items-center justify-between bg-surface/30 backdrop-blur">
+      <header className="h-14 border-b border-surface-border/80 px-6 flex items-center justify-between bg-surface/30 backdrop-blur-md">
         <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border text-xs text-gray-200">
+          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border text-xs text-gray-200 shadow-sm">
             <Sparkles className="w-3.5 h-3.5 text-brand-500" />
             <span className="font-medium">Gemini 1.5 Pro</span>
           </div>
-          <span className="text-[11px] text-gray-500 font-mono">OAuth 安全中转链路</span>
+          <span className="text-[11px] text-gray-500 font-mono">Tauri 2 原生 IPC 链路</span>
         </div>
 
         <div className="flex items-center space-x-2">
@@ -78,7 +78,7 @@ export const ChatStreamView: React.FC = () => {
               className={`flex items-start space-x-3 ${isUser ? 'flex-row-reverse space-x-reverse' : ''}`}
             >
               <div
-                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-sm ${
                   isUser ? 'bg-brand-600 text-white' : 'bg-surface border border-surface-border text-brand-500'
                 }`}
               >
@@ -87,10 +87,10 @@ export const ChatStreamView: React.FC = () => {
 
               <div className={`max-w-xl space-y-1 ${isUser ? 'text-right' : ''}`}>
                 <div
-                  className={`inline-block p-4 rounded-2xl text-xs leading-relaxed ${
+                  className={`inline-block p-4 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
                     isUser
-                      ? 'bg-brand-600 text-white rounded-tr-none'
-                      : 'bg-surface border border-surface-border text-gray-200 rounded-tl-none'
+                      ? 'bg-brand-600 text-white rounded-tr-none shadow-md shadow-brand-600/10'
+                      : 'bg-surface border border-surface-border text-gray-200 rounded-tl-none shadow-sm'
                   }`}
                 >
                   {msg.content}
@@ -102,9 +102,9 @@ export const ChatStreamView: React.FC = () => {
         })}
       </main>
 
-      {/* 底部输入控制区 */}
+      {/* 底部圆角多模态输入框 */}
       <footer className="p-6 bg-gradient-to-t from-background via-background to-transparent">
-        <div className="max-w-3xl mx-auto bg-surface border border-surface-border rounded-2xl p-3 shadow-xl focus-within:border-brand-500/50 transition-colors">
+        <div className="max-w-3xl mx-auto bg-surface border border-surface-border/80 rounded-2xl p-3 shadow-2xl focus-within:border-brand-500/50 transition-colors">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -114,17 +114,23 @@ export const ChatStreamView: React.FC = () => {
                 handleSend();
               }
             }}
-            placeholder="输入对话或指令 (Shift + Enter 换行)..."
+            placeholder="输入 AI 对话任务 (Shift + Enter 换行)..."
             rows={2}
             className="w-full bg-transparent text-xs text-gray-100 placeholder-gray-500 resize-none outline-none px-2"
           />
 
           <div className="flex items-center justify-between pt-2 border-t border-surface-border/40 px-1">
             <div className="flex items-center space-x-1">
-              <button className="p-1.5 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors">
+              <button
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors"
+                title="上传本地图片"
+              >
                 <ImageIcon className="w-4 h-4" />
               </button>
-              <button className="p-1.5 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors">
+              <button
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-surface-hover transition-colors"
+                title="解析本地文档"
+              >
                 <Paperclip className="w-4 h-4" />
               </button>
             </div>
