@@ -1,8 +1,42 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// 流式推送负载数据结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GeminiStreamPayload {
+    pub task_id: String,
+    pub chunk: String,
+    pub is_done: bool,
+    pub is_error: bool,
+}
+
+/// 高效过滤 ANSI 终端颜色转义字符
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1B' {
+            if let Some(&'[') = chars.peek() {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc.is_ascii_alphabetic() || nc == 'm' || nc == 'K' || nc == 'H' || nc == 'J' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        result.push(c);
+    }
+    result
+}
+
 
 // 默认 Google Cloud Client 配置（可通过环境或设置传入覆盖）
 const DEFAULT_CLIENT_ID: &str = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
@@ -290,6 +324,128 @@ pub fn clear_token(
     Ok(())
 }
 
+/// Command 6: 异步拉起全局 Gemini CLI 任务并实时推送到前端
+#[tauri::command]
+pub async fn execute_gemini_task(
+    window: tauri::Window,
+    prompt: String,
+    current_workspace: Option<String>,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    let tid = task_id.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().to_string())
+            .unwrap_or_else(|_| "task_0".to_string())
+    });
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = tokio::process::Command::new("cmd");
+    #[cfg(target_os = "windows")]
+    cmd.args(["/C", "gemini", &prompt]);
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = tokio::process::Command::new("gemini");
+    #[cfg(not(target_os = "windows"))]
+    cmd.arg(&prompt);
+
+    // 继承完整环境变量
+    for (k, v) in std::env::vars() {
+        cmd.env(k, v);
+    }
+
+    // 切换到用户当前工作区路径
+    if let Some(ref ws) = current_workspace {
+        if !ws.trim().is_empty() {
+            let path = PathBuf::from(ws);
+            if path.exists() && path.is_dir() {
+                cmd.current_dir(path);
+            }
+        }
+    }
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = window.emit(
+                "gemini-stream",
+                GeminiStreamPayload {
+                    task_id: tid.clone(),
+                    chunk: format!("无法拉起系统 gemini 命令，请检查 CLI 是否配置全路径或已加入 PATH: {}\n", e),
+                    is_done: true,
+                    is_error: true,
+                },
+            );
+            return Err(format!("拉起 Gemini 失败: {}", e));
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let window_stdout = window.clone();
+    let tid_stdout = tid.clone();
+
+    let stdout_handle = tokio::spawn(async move {
+        if let Some(stdout) = stdout {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let cleaned_line = strip_ansi_codes(&line);
+                let _ = window_stdout.emit(
+                    "gemini-stream",
+                    GeminiStreamPayload {
+                        task_id: tid_stdout.clone(),
+                        chunk: format!("{}\n", cleaned_line),
+                        is_done: false,
+                        is_error: false,
+                    },
+                );
+            }
+        }
+    });
+
+    let window_stderr = window.clone();
+    let tid_stderr = tid.clone();
+
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let cleaned_line = strip_ansi_codes(&line);
+                if !cleaned_line.trim().is_empty() {
+                    let _ = window_stderr.emit(
+                        "gemini-stream",
+                        GeminiStreamPayload {
+                            task_id: tid_stderr.clone(),
+                            chunk: format!("{}\n", cleaned_line),
+                            is_done: false,
+                            is_error: true,
+                        },
+                    );
+                }
+            }
+        }
+    });
+
+    let _ = tokio::join!(stdout_handle, stderr_handle);
+    let status = child.wait().await.map_err(|e| format!("进程等待发生错误: {}", e))?;
+
+    let _ = window.emit(
+        "gemini-stream",
+        GeminiStreamPayload {
+            task_id: tid,
+            chunk: "".to_string(),
+            is_done: true,
+            is_error: !status.success(),
+        },
+    );
+
+    Ok(())
+}
+
 /// Tauri 应用入口与指令挂载
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -297,6 +453,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             token: Mutex::new(None),
         })
@@ -305,7 +462,8 @@ pub fn run() {
             poll_for_token,
             save_token,
             load_token,
-            clear_token
+            clear_token,
+            execute_gemini_task
         ])
         .run(tauri::generate_context!())
         .expect("启动 Celatura 桌面端进程发生严重错误");
