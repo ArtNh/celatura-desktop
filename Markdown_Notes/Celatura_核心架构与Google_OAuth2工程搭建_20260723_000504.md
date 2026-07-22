@@ -57,4 +57,14 @@
 > 3. 实现 `save_token`, `load_token`, `clear_token` 文件系统与全局 State 双重持久化存储。
 > 4. `tauri.conf.json` 配置 1280x830 居中窗口及 `frontendDist: "../out"`。
 
+---
+
+### [2026-07-23 00:18:15] 前端工程化配置与 Shimmering Obsidian 微光暗黑设计系统升级
+
+> **更新说明**：
+> 1. 精细化升级 `next.config.mjs`，显式配置 `output: 'export'`, `images: { unoptimized: true }` 及 `trailingSlash: true`。
+> 2. `tsconfig.json` 完善 `@/*` 模块别名与 ES2022 编译选项。
+> 3. 雕琢 `src/app/globals.css` 微光暗黑视觉体系（Shimmering Obsidian）：极深黑灰渐变背景 (`#0D0E11` -> `#13151A`)、钛金与青色微光边框 (`rgba(255,255,255,0.06)`)、钛金高亮选区与圆角扁平暗黑滚动条。
+
+
 

@@ -2,25 +2,45 @@
 @tailwind components;
 @tailwind utilities;
 
+/* -------------------------------------------------------------------------- */
+/* Celatura 顶级暗黑微光设计系统 (Shimmering Obsidian System)               */
+/* -------------------------------------------------------------------------- */
+
 :root {
-  --color-background: #090a0f;
+  --bg-gradient-from: #0d0e11;
+  --bg-gradient-to: #13151a;
   --color-surface: #11131a;
-  --color-surface-hover: #1a1d27;
-  --color-border: #232736;
+  --color-surface-hover: rgba(255, 255, 255, 0.035);
+  --border-micro-shimmer: rgba(255, 255, 255, 0.06);
+  --border-brand-glow: rgba(59, 130, 246, 0.2);
+  --accent-cyan-glow: rgba(99, 102, 241, 0.15);
 }
 
 body {
-  background-color: var(--color-background);
+  background: linear-gradient(135deg, var(--bg-gradient-from) 0%, var(--bg-gradient-to) 100%);
+  background-attachment: fixed;
   color: #f3f4f6;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   overflow: hidden;
   user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* 自定义暗黑滚动条样式 */
+/* 文本选择高亮 */
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: #ffffff;
+  text-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 极致圆角扁平暗黑滚动条                                                     */
+/* -------------------------------------------------------------------------- */
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -28,10 +48,65 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2b3042;
-  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 9999px;
+  transition: background 0.2s ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3b425b;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 微光组件与卡片工具类                                                       */
+/* -------------------------------------------------------------------------- */
+
+@layer utilities {
+  /* 钛金微光边框 */
+  .border-shimmer {
+    border: 1px solid var(--border-micro-shimmer);
+  }
+
+  .border-shimmer-glow {
+    border: 1px solid var(--border-brand-glow);
+    box-shadow: inset 0 0 12px var(--accent-cyan-glow);
+  }
+
+  /* 暗黑玻璃拟态 */
+  .glass-card {
+    background: rgba(17, 19, 26, 0.7);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .glass-card-hover {
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .glass-card-hover:hover {
+    background: rgba(26, 29, 39, 0.85);
+    border-color: rgba(59, 130, 246, 0.3);
+    box-shadow: 0 8px 32px -8px rgba(0, 0, 0, 0.5), 0 0 15px rgba(59, 130, 246, 0.1);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 微风渐变闪烁动画                                                           */
+/* -------------------------------------------------------------------------- */
+
+@keyframes shimmerPulse {
+  0%, 100% {
+    border-color: rgba(255, 255, 255, 0.06);
+    box-shadow: 0 0 0px rgba(59, 130, 246, 0);
+  }
+  50% {
+    border-color: rgba(59, 130, 246, 0.35);
+    box-shadow: 0 0 18px rgba(59, 130, 246, 0.15);
+  }
+}
+
+.animate-shimmer-pulse {
+  animation: shimmerPulse 3s infinite cubic-bezier(0.4, 0, 0.6, 1);
 }
