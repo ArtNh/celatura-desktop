@@ -47,3 +47,14 @@
 > 2. Rust 后端成功导出 `request_device_code` 与 `poll_for_token` 两个核心 Tauri Command。
 > 3. 前端完成克制暗黑（Dark Mode）双栏 UI 视觉设计，包含设备授权码展示、复制、唤起默认浏览器及动画平滑过渡。
 
+---
+
+### [2026-07-23 00:13:50] Rust 后端核心逻辑与多态错误机制精细化升级
+
+> **更新说明**：
+> 1. 精细化重构 `src-tauri/src/lib.rs`，派生 `Serialize, Deserialize, Clone, Debug` 数据结构。
+> 2. 实现精准匹配 Google OAuth2 返回的 4 类错误状态：`authorization_pending`, `slow_down`, `access_denied`, `expired_token`。
+> 3. 实现 `save_token`, `load_token`, `clear_token` 文件系统与全局 State 双重持久化存储。
+> 4. `tauri.conf.json` 配置 1280x830 居中窗口及 `frontendDist: "../out"`。
+
+
