@@ -44,9 +44,14 @@ fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
+// 默认 Google Cloud Client 配置
+const DEFAULT_CLIENT_ID: &str = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
+const DEFAULT_CLIENT_SECRET: &str = "YOUR_GOOGLE_CLIENT_SECRET";
+
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/generative-language https://www.googleapis.com/auth/cloud-platform";
+const CUSTOM_PROTOCOL_REDIRECT_URI: &str = "celatura://auth";
 
 /// 身份凭证存储结构
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -126,6 +131,66 @@ fn url_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }
 
+/// 操作系统 Deep Link (celatura://) 唤起事件处理的核心大动脉
+fn handle_deep_link_url(app_handle: &AppHandle, url_str: &str) {
+    if let Ok(parsed_url) = url::Url::parse(url_str) {
+        if parsed_url.scheme() == "celatura" {
+            if let Some((_, code)) = parsed_url.query_pairs().find(|(k, _)| k == "code") {
+                let code = code.to_string();
+                let app_handle_clone = app_handle.clone();
+
+                // 唤醒并聚焦操作系统窗口
+                if let Some(main_win) = app_handle.get_webview_window("main") {
+                    let _ = main_win.unminimize();
+                    let _ = main_win.set_focus();
+                }
+
+                // 在后台异步换取 Token
+                tauri::async_runtime::spawn(async move {
+                    let saved_creds = commands::load_client_credentials(app_handle_clone.clone()).unwrap_or(None);
+                    let cid = saved_creds.as_ref().map(|c| c.client_id.clone()).unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
+                    let csecret = saved_creds.as_ref().map(|c| c.client_secret.clone()).unwrap_or_else(|| DEFAULT_CLIENT_SECRET.to_string());
+
+                    let client = reqwest::Client::new();
+                    let params = [
+                        ("client_id", cid.as_str()),
+                        ("client_secret", csecret.as_str()),
+                        ("code", code.as_str()),
+                        ("grant_type", "authorization_code"),
+                        ("redirect_uri", CUSTOM_PROTOCOL_REDIRECT_URI),
+                    ];
+
+                    if let Ok(res) = client.post(GOOGLE_TOKEN_URL).form(&params).send().await {
+                        if let Ok(raw_resp) = res.json::<RawGoogleTokenResponse>().await {
+                            if let Some(access_token) = raw_resp.access_token {
+                                let now_sec = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+
+                                let auth_token = AuthToken {
+                                    access_token,
+                                    refresh_token: raw_resp.refresh_token,
+                                    expires_in: raw_resp.expires_in,
+                                    token_type: raw_resp.token_type,
+                                    scope: raw_resp.scope,
+                                    created_at: now_sec,
+                                };
+
+                                if let Some(state_app) = app_handle_clone.try_state::<AppState>() {
+                                    let _ = save_token_internal(&app_handle_clone, &state_app, auth_token.clone());
+                                }
+
+                                let _ = app_handle_clone.emit("oauth-success", auth_token);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Tauri Commands 模块定义
 // ============================================================================
@@ -169,140 +234,32 @@ pub mod commands {
         Ok(None)
     }
 
-    /// Command 3: 本地 OAuth2 回调 HTTP 服务与浏览器唤起（动态读取自定义凭证）
+    /// Command 3: 纯操作系统级 Deep Link (celatura://) 唤起式 OAuth2
     #[tauri::command]
-    pub async fn start_google_oauth(
-        window: tauri::Window,
+    pub async fn start_google_oauth_deeplink(
         client_id: Option<String>,
-        client_secret: Option<String>,
         app_handle: AppHandle,
-        _state: State<'_, AppState>,
     ) -> Result<String, String> {
-        // 从本地磁盘自动检索用户保存的客户端凭证
         let saved_creds = load_client_credentials(app_handle.clone()).unwrap_or(None);
 
         let cid = client_id
             .filter(|s| !s.trim().is_empty())
             .or_else(|| saved_creds.as_ref().map(|c| c.client_id.clone()))
-            .ok_or_else(|| "未检测到有效的 Google Client ID，请先在界面配置并点击保存凭证！".to_string())?;
+            .ok_or_else(|| "未检测到有效的 Google Client ID，请先在界面配置！".to_string())?;
 
-        let csecret = client_secret
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| saved_creds.as_ref().map(|c| c.client_secret.clone()))
-            .ok_or_else(|| "未检测到有效的 Google Client Secret，请先在界面配置并点击保存凭证！".to_string())?;
-
-        // 1. 启动本地 127.0.0.1 随机端口 HTTP 服务器
-        let server = tiny_http::Server::http("127.0.0.1:0")
-            .map_err(|e| format!("无法启动本地回调 HTTP 服务: {}", e))?;
-
-        let port = server.server_addr().to_ip().map(|addr| addr.port()).unwrap_or(0);
-        if port == 0 {
-            return Err("分配本地随机端口失败".to_string());
-        }
-
-        let redirect_uri = format!("http://127.0.0.1:{}", port);
-
-        // 2. 构造标准网页 OAuth2 授权 URL
+        // 拼接指向上层系统自定义协议的 Redirect URI
         let auth_url = format!(
             "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
             GOOGLE_AUTH_URL,
             url_encode(&cid),
-            url_encode(&redirect_uri),
+            url_encode(CUSTOM_PROTOCOL_REDIRECT_URI),
             url_encode(DEFAULT_SCOPE)
         );
 
-        // 3. 唤起系统默认浏览器
+        // 唤起系统默认浏览器
         let _ = tauri_plugin_opener::open_url(&auth_url, None::<&str>);
 
-        let app_handle_clone = app_handle.clone();
-        let redirect_uri_cb = redirect_uri.clone();
-
-        // 4. 后台线程监听重定向回调
-        tokio::task::spawn_blocking(move || {
-            if let Ok(Some(request)) = server.recv_timeout(std::time::Duration::from_secs(300)) {
-                let req_url = format!("http://localhost{}", request.url());
-                if let Ok(parsed_url) = url::Url::parse(&req_url) {
-                    let code_opt = parsed_url
-                        .query_pairs()
-                        .find(|(k, _)| k == "code")
-                        .map(|(_, v)| v.to_string());
-
-                    if let Some(code) = code_opt {
-                        let html = r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Celatura - 授权成功</title>
-    <style>
-        body { background-color: #0d0e11; color: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .card { background: rgba(17, 19, 26, 0.9); border: 1px solid rgba(59, 130, 246, 0.3); padding: 40px; border-radius: 20px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        h1 { color: #60a5fa; margin-bottom: 12px; font-size: 24px; }
-        p { color: #9ca3af; font-size: 14px; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>Google 账号授权成功</h1>
-        <p>凭证已安全建立，您可以关闭此浏览器标签页并返回 Celatura 桌面客户端。</p>
-    </div>
-</body>
-</html>"#;
-                        let response = tiny_http::Response::from_string(html)
-                            .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap());
-                        let _ = request.respond(response);
-
-                        // 异步换取 Token
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build();
-
-                        if let Ok(rt) = runtime {
-                            rt.block_on(async {
-                                let client = reqwest::Client::new();
-                                let params = [
-                                    ("client_id", cid.as_str()),
-                                    ("client_secret", csecret.as_str()),
-                                    ("code", code.as_str()),
-                                    ("grant_type", "authorization_code"),
-                                    ("redirect_uri", redirect_uri_cb.as_str()),
-                                ];
-
-                                if let Ok(res) = client.post(GOOGLE_TOKEN_URL).form(&params).send().await {
-                                    if let Ok(raw_resp) = res.json::<RawGoogleTokenResponse>().await {
-                                        if let Some(access_token) = raw_resp.access_token {
-                                            let now_sec = std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_secs())
-                                                .unwrap_or(0);
-
-                                            let auth_token = AuthToken {
-                                                access_token,
-                                                refresh_token: raw_resp.refresh_token,
-                                                expires_in: raw_resp.expires_in,
-                                                token_type: raw_resp.token_type,
-                                                scope: raw_resp.scope,
-                                                created_at: now_sec,
-                                            };
-
-                                            if let Some(state_app) = app_handle_clone.try_state::<AppState>() {
-                                                let _ = save_token_internal(&app_handle_clone, &state_app, auth_token.clone());
-                                            }
-
-                                            let _ = window.emit("oauth-success", auth_token);
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    } else {
-                        let response = tiny_http::Response::from_string("授权失败: 未包含 code 参数");
-                        let _ = request.respond(response);
-                    }
-                }
-            }
-        });
-
-        Ok(redirect_uri)
+        Ok(auth_url)
     }
 
     /// Command 4: 手动保存 AuthToken
@@ -492,13 +449,21 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            for arg in argv {
+                if arg.starts_with("celatura://") {
+                    handle_deep_link_url(app, &arg);
+                }
+            }
+        }))
         .manage(AppState {
             token: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             commands::save_client_credentials,
             commands::load_client_credentials,
-            commands::start_google_oauth,
+            commands::start_google_oauth_deeplink,
             commands::save_token,
             commands::load_token,
             commands::clear_token,
