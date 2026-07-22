@@ -1,0 +1,30 @@
+[package]
+name = "celatura-desktop"
+version = "0.1.0"
+description = "Cross-platform Native Gemini AI Desktop Client powered by Tauri 2"
+authors = ["ArtNh"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-opener = "2.0.0"
+tauri-plugin-shell = "2.0.0"
+tauri-plugin-store = "2.0.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1.38", features = ["full"] }
+
+[lib]
+name = "celatura_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

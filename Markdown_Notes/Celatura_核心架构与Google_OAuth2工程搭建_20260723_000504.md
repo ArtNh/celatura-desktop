@@ -1,0 +1,49 @@
+### [2026-07-23 00:05:04] Celatura 核心骨架搭建与 Google OAuth2 设备码登录实现计划
+
+> **阶段任务**：搭建基于 Tauri 2 + Next.js 14 (App Router) + Tailwind CSS 的项目完整架构骨架，实现 Rust 后端 Google OAuth2 设备授权流（Device Authorization Grant）及前端极简暗黑双栏 UI 界面。
+
+---
+
+#### 一、 架构与依赖设计
+
+1. **Rust 后端 (`src-tauri/Cargo.toml` & `lib.rs`)**
+   - 整合 `reqwest` 处理向谷歌 OAuth2 设备端点 (`https://oauth2.googleapis.com/device/code`) 和 Token 端点 (`https://oauth2.googleapis.com/token`) 的请求。
+   - 导出的 Tauri Command：
+     - `request_device_code` -> 请求设备授权码。
+     - `poll_for_token` -> 接收 `device_code` 安全轮询鉴权状态。
+     - `get_stored_token` / `clear_token` -> 本地凭证读写。
+2. **Next.js 前端 (`package.json`, `tailwind.config.ts`, `src/app/*`)**
+   - 配置 Next.js App Router 静态导出 (`output: 'export'`) 适配 Tauri 2。
+   - 实现深色（Dark Mode）智能体工作台双栏布局：
+     - 左侧常驻任务导航与认证状态。
+     - 右侧显示未登录授权卡片（高亮设备码、一键复制、唤起默认浏览器）与已登录主对话流动画过渡。
+
+---
+
+#### 二、 计划生成文件列表
+
+- `package.json`
+- `tsconfig.json`
+- `next.config.mjs`
+- `postcss.config.mjs`
+- `tailwind.config.ts`
+- `src/app/globals.css`
+- `src/app/layout.tsx`
+- `src/app/page.tsx`
+- `src/components/Sidebar.tsx`
+- `src/components/AuthCard.tsx`
+- `src/components/ChatStreamView.tsx`
+- `src-tauri/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+- `src-tauri/src/lib.rs`
+- `src-tauri/src/main.rs`
+
+---
+
+### [2026-07-23 00:07:15] Celatura 核心骨架与 Google OAuth2 设备码登录模块成功落地
+
+> **落地效果**：
+> 1. 完成 Tauri 2 + Next.js 14 App Router (Static Export) + Tailwind CSS 的完整代码库工程化落地。
+> 2. Rust 后端成功导出 `request_device_code` 与 `poll_for_token` 两个核心 Tauri Command。
+> 3. 前端完成克制暗黑（Dark Mode）双栏 UI 视觉设计，包含设备授权码展示、复制、唤起默认浏览器及动画平滑过渡。
+
