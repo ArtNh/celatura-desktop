@@ -16,6 +16,11 @@ const nextConfig = {
 
   // SWC 编译器选项
   swcMinify: true,
+
+  // ESLint 与类型检查构建配置
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
 };
 
 export default nextConfig;

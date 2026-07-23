@@ -3,8 +3,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Send,
-  Image as ImageIcon,
-  Paperclip,
   Sparkles,
   Bot,
   User,
@@ -14,6 +12,10 @@ import {
   Code2,
   Terminal,
   Loader2,
+  ChevronDown,
+  Zap,
+  Globe,
+  Cpu,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -28,13 +30,21 @@ export interface Message {
 }
 
 interface GeminiStreamPayload {
-  task_id: String;
-  chunk: String;
+  task_id: string;
+  chunk: string;
   is_done: boolean;
   is_error: boolean;
 }
 
-/// 自定义高阶代码块容器（包含语言标签与一键复制功能）
+/// 支持的核心大语言模型提供商定义
+const AVAILABLE_MODELS = [
+  { id: 'Gemini 1.5 Pro', name: 'Gemini 1.5 Pro (CLI Native)', provider: 'Google', icon: Sparkles, color: 'text-brand-400' },
+  { id: 'Gemini 1.5 Flash', name: 'Gemini 1.5 Flash', provider: 'Google', icon: Sparkles, color: 'text-emerald-400' },
+  { id: 'DeepSeek V3 / R1', name: 'DeepSeek V3 / R1 Reasoning', provider: 'DeepSeek', icon: Zap, color: 'text-sky-400' },
+  { id: 'Custom OpenAI', name: 'Custom OpenAI-Compatible', provider: 'Custom', icon: Globe, color: 'text-purple-400' },
+];
+
+/// 自定义高阶代码块容器
 const CodeBlock: React.FC<{ language: string; value: string }> = ({ language, value }) => {
   const [copied, setCopied] = useState(false);
 
@@ -76,13 +86,16 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       id: 'welcome',
       sender: 'assistant',
       content:
-        '欢迎使用 **Celatura Native Gemini Client**。项目已打通 Tauri 2 原生 IPC 进程与工作区感知系统。选择本地代码库目录后下达任务，AI 将直接挂载上下文并执行任务。',
+        '欢迎使用 **Celatura 商业级多模型凭证智能体工作台**。系统已自动联动 Tauri 2 原生 IPC 与环境凭证引擎。配置 API Key 或注入环境变量后，选择代码工作区与目标大语言模型，AI 将全自动展开多流式任务执行。',
       timestamp: '00:00',
     },
   ]);
   const [input, setInput] = useState<string>('');
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [selectedModel, setSelectedModel] = useState<string>('Gemini 1.5 Pro');
+  const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 自动滚动到底部
@@ -145,7 +158,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: '选择 Gemini AI 绑定的本地代码库/工作区目录',
+        title: '选择 AI 智能体绑定的本地代码库/工作区目录',
       });
 
       if (selected && typeof selected === 'string') {
@@ -188,6 +201,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
         prompt: userPrompt,
         currentWorkspace: workspace,
         taskId: taskId,
+        model: selectedModel,
       });
     } catch (err: any) {
       console.error('调用 execute_gemini_task 失败:', err);
@@ -196,7 +210,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
           m.id === taskId
             ? {
                 ...m,
-                content: `执行失败或无法拉起 Gemini CLI: ${err?.message || err}`,
+                content: `执行失败或无法拉起大模型命令管道: ${err?.message || err}`,
                 isStreaming: false,
                 isError: true,
               }
@@ -207,16 +221,66 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     }
   };
 
+  const activeModelObj = AVAILABLE_MODELS.find((m) => m.id === selectedModel) || AVAILABLE_MODELS[0];
+  const IconComp = activeModelObj.icon;
+
   return (
     <div className="flex-1 h-full bg-background flex flex-col justify-between overflow-hidden select-none">
-      {/* 顶部 Header：状态与工作区感知选择器 */}
-      <header className="h-14 border-b border-surface-border/80 px-6 flex items-center justify-between bg-surface/30 backdrop-blur-md">
+      {/* 顶部 Header：多模型选择下拉菜单与工作区绑定 */}
+      <header className="h-14 border-b border-surface-border/80 px-6 flex items-center justify-between bg-surface/30 backdrop-blur-md relative z-20">
         <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border text-xs text-gray-200">
-            <Sparkles className="w-3.5 h-3.5 text-brand-500" />
-            <span className="font-medium">Gemini 1.5 Pro (CLI Native)</span>
+          {/* 模型选择器下拉列表 */}
+          <div className="relative">
+            <button
+              onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+              className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border hover:border-brand-500/50 text-xs text-gray-200 transition-colors"
+            >
+              <IconComp className={`w-3.5 h-3.5 ${activeModelObj.color}`} />
+              <span className="font-medium">{activeModelObj.name}</span>
+              <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+            </button>
+
+            <AnimatePresence>
+              {isModelDropdownOpen && (
+                <motion.div
+                  initial={{ opacity: 0, y: 5 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 5 }}
+                  className="absolute top-full left-0 mt-1 w-64 bg-[#0f111a] border border-surface-border/90 rounded-xl p-1.5 shadow-2xl z-30"
+                >
+                  <div className="px-2 py-1 text-[10px] text-gray-500 font-mono uppercase tracking-wider">
+                    提供商与目标大模型
+                  </div>
+                  {AVAILABLE_MODELS.map((item) => {
+                    const ItemIcon = item.icon;
+                    const isSelected = item.id === selectedModel;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setSelectedModel(item.id);
+                          setIsModelDropdownOpen(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs transition-colors ${
+                          isSelected
+                            ? 'bg-brand-600/20 text-brand-300 font-medium'
+                            : 'text-gray-300 hover:bg-surface-hover hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2">
+                          <ItemIcon className={`w-3.5 h-3.5 ${item.color}`} />
+                          <span>{item.name}</span>
+                        </div>
+                        {isSelected && <Check className="w-3.5 h-3.5 text-brand-400" />}
+                      </button>
+                    );
+                  })}
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 Async Channel</span>
+
+          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 Native Stream</span>
         </div>
 
         {/* 工作区路径绑定按钮 */}
@@ -319,8 +383,8 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             }}
             placeholder={
               workspace
-                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 下下达 AI 对话任务 (Shift + Enter 换行)...`
-                : '输入 AI 对话任务 (建议先在右上角选择工作区目录)...'
+                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 下由 [${selectedModel}] 下达对话任务 (Shift + Enter 换行)...`
+                : `由 [${selectedModel}] 下达对话任务 (建议在右上角绑定工作区)...`
             }
             rows={2}
             className="w-full bg-transparent text-xs text-gray-100 placeholder-gray-500 resize-none outline-none px-2"
@@ -330,7 +394,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             <div className="flex items-center space-x-1 text-gray-400 text-xs font-mono">
               <Terminal className="w-3.5 h-3.5 text-gray-500" />
               <span className="text-[11px] text-gray-500">
-                {workspace ? `Workspace: ${workspace}` : '未选择工作区'}
+                {workspace ? `Workspace: ${workspace}` : '未绑定工作区'}
               </span>
             </div>
 

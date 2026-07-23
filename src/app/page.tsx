@@ -1,63 +1,32 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import React, { useState } from 'react';
 import { Sidebar } from '@/components/Sidebar';
-import { AuthCard } from '@/components/AuthCard';
 import { ChatStreamView } from '@/components/ChatStreamView';
+import { SettingsModal } from '@/components/SettingsModal';
 
 export default function Home(): React.JSX.Element {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [isAuthenticating, setIsAuthenticating] = useState<boolean>(false);
   const [activeSessionId, setActiveSessionId] = useState<string>('1');
-
-  useEffect(() => {
-    const initCheckToken = async () => {
-      try {
-        const token: any = await invoke('load_token');
-        if (token && token.access_token) {
-          setIsAuthenticated(true);
-        }
-      } catch (err) {
-        // 开发环境容错处理
-      }
-    };
-
-    initCheckToken();
-  }, []);
-
-  const handleLogout = async () => {
-    try {
-      await invoke('clear_token');
-    } catch (e) {}
-    setIsAuthenticated(false);
-    setIsAuthenticating(false);
-  };
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
   return (
     <main className="flex h-screen w-screen overflow-hidden bg-background">
       {/* 左侧常驻工作台侧边栏 */}
       <Sidebar
-        isAuthenticated={isAuthenticated}
-        isAuthenticating={isAuthenticating}
-        onLogout={handleLogout}
         onNewChat={() => setActiveSessionId(Date.now().toString())}
         activeSessionId={activeSessionId}
         onSelectSession={(id: string) => setActiveSessionId(id)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
-      {/* 右侧主工作区：未登录渲染 AuthCard，已登录进入 ChatStreamView */}
-      {isAuthenticated ? (
-        <ChatStreamView key={activeSessionId} />
-      ) : (
-        <AuthCard
-          onSuccess={() => {
-            setIsAuthenticated(true);
-            setIsAuthenticating(false);
-          }}
-          onAuthStateChange={(authenticating: boolean) => setIsAuthenticating(authenticating)}
-        />
-      )}
+      {/* 右侧主工作区：无感直达多模型智能体工作台 */}
+      <ChatStreamView key={activeSessionId} />
+
+      {/* 极简暗黑毛玻璃多模型凭证与引擎设置弹窗 */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </main>
   );
 }
