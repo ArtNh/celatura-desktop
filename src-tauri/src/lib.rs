@@ -1,6 +1,7 @@
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -71,6 +72,62 @@ fn get_model_config_file_path(app_handle: &AppHandle) -> Result<PathBuf, String>
     Ok(config_dir.join("model_config.json"))
 }
 
+/// 本地工作区感知 (Workspace Awareness) 自动预扫描提取函数
+fn build_workspace_context(workspace_path: &str) -> Option<String> {
+    let path = Path::new(workspace_path);
+    if !path.exists() || !path.is_dir() {
+        return None;
+    }
+
+    let mut context = String::new();
+    context.push_str(&format!("[Celatura 本地工作区上下文注入]\n工作区根目录: {}\n\n顶级目录与关键文件清单:\n", workspace_path));
+
+    if let Ok(entries) = fs::read_dir(path) {
+        let mut count = 0;
+        for entry in entries.flatten() {
+            if count >= 30 {
+                context.push_str("- ... (其它文件已忽略)\n");
+                break;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            // 忽略常见大中型临时与构建目录
+            if file_name == "node_modules"
+                || file_name == ".git"
+                || file_name == "target"
+                || file_name == ".next"
+                || file_name == "out"
+                || file_name == "dist"
+                || file_name == "build"
+            {
+                continue;
+            }
+
+            let file_type = if entry.path().is_dir() { "[Dir]" } else { "[File]" };
+            context.push_str(&format!("- {} {}\n", file_type, file_name));
+            count += 1;
+        }
+    }
+
+    // 自动扫描读取项目核心配置文件 Manifest
+    let pkg_json_path = path.join("package.json");
+    if pkg_json_path.exists() {
+        if let Ok(content) = fs::read_to_string(pkg_json_path) {
+            let snippet: String = content.lines().take(40).collect::<Vec<&str>>().join("\n");
+            context.push_str(&format!("\n[Key Manifest: package.json (前40行)]\n```json\n{}\n```\n", snippet));
+        }
+    }
+
+    let cargo_toml_path = path.join("Cargo.toml");
+    if cargo_toml_path.exists() {
+        if let Ok(content) = fs::read_to_string(cargo_toml_path) {
+            let snippet: String = content.lines().take(40).collect::<Vec<&str>>().join("\n");
+            context.push_str(&format!("\n[Key Manifest: Cargo.toml (前40行)]\n```toml\n{}\n```\n", snippet));
+        }
+    }
+
+    Some(context)
+}
+
 // ============================================================================
 // Tauri Commands 模块定义
 // ============================================================================
@@ -84,13 +141,11 @@ pub mod commands {
         let mut config = if file_path.exists() {
             let content = fs::read_to_string(&file_path)
                 .map_err(|e| format!("读取配置文件失败: {}", e))?;
-            serde_json::from_str::<ModelConfig>(&content)
-                .unwrap_or_default()
+            serde_json::from_str::<ModelConfig>(&content).unwrap_or_default()
         } else {
             ModelConfig::default()
         };
 
-        // 如果用户尚未在配置中手动设置 Gemini API Key，自动尝试回退读取系统环境变量 GEMINI_API_KEY
         if config.gemini_api_key.trim().is_empty() {
             if let Ok(env_key) = std::env::var("GEMINI_API_KEY") {
                 if !env_key.trim().is_empty() {
@@ -108,10 +163,7 @@ pub mod commands {
 
     /// Command 2: 保存多模型 API 凭证配置
     #[tauri::command]
-    pub fn save_model_config(
-        config: ModelConfig,
-        app_handle: AppHandle,
-    ) -> Result<(), String> {
+    pub fn save_model_config(config: ModelConfig, app_handle: AppHandle) -> Result<(), String> {
         let file_path = get_model_config_file_path(&app_handle)?;
         let json_data = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("序列化模型配置失败: {}", e))?;
@@ -142,15 +194,16 @@ pub mod commands {
         })
     }
 
-    /// Command 4: 异步拉起大模型 CLI/服务任务并实时推送到前端
+    /// Command 4: 多模型中转路由与 SSE 异步流式通信核心控制命令
     #[tauri::command]
-    pub async fn execute_gemini_task(
+    pub async fn execute_llm_task(
         window: tauri::Window,
         app_handle: AppHandle,
         prompt: String,
         current_workspace: Option<String>,
         task_id: Option<String>,
         model: Option<String>,
+        provider: Option<String>,
         api_key: Option<String>,
     ) -> Result<(), String> {
         let tid = task_id.unwrap_or_else(|| {
@@ -160,48 +213,239 @@ pub mod commands {
                 .unwrap_or_else(|_| "task_0".to_string())
         });
 
-        // 获取模型凭证
         let saved_config = load_model_config(app_handle.clone()).unwrap_or_default();
-        
-        let resolved_api_key = api_key
-            .filter(|k| !k.trim().is_empty())
-            .or_else(|| {
-                if !saved_config.gemini_api_key.trim().is_empty() {
-                    Some(saved_config.gemini_api_key.clone())
-                } else {
-                    std::env::var("GEMINI_API_KEY").ok()
-                }
-            });
+        let target_model = model.unwrap_or(saved_config.active_model.clone());
 
+        // 拼接工作区上下文与 System Prompt
+        let mut full_prompt = prompt.clone();
+        if let Some(ref ws) = current_workspace {
+            if let Some(ws_ctx) = build_workspace_context(ws) {
+                full_prompt = format!("{}\n\n[用户当前任务指令]:\n{}", ws_ctx, prompt);
+            }
+        }
+
+        // 推导选定的 Model Provider
+        let selected_provider = provider.unwrap_or_else(|| {
+            if target_model.contains("DeepSeek") {
+                "deepseek".to_string()
+            } else if target_model.contains("OpenAI") || target_model.contains("Custom") {
+                "openai".to_string()
+            } else {
+                "gemini".to_string()
+            }
+        });
+
+        // 优先使用传入的 API Key，或自动读取对应 Provider 配置与系统环境变量
+        let resolved_api_key = api_key.filter(|k| !k.trim().is_empty()).or_else(|| {
+            match selected_provider.as_str() {
+                "deepseek" => {
+                    if !saved_config.deepseek_api_key.trim().is_empty() {
+                        Some(saved_config.deepseek_api_key.clone())
+                    } else {
+                        std::env::var("DEEPSEEK_API_KEY").ok()
+                    }
+                }
+                "openai" => {
+                    if !saved_config.custom_openai_api_key.trim().is_empty() {
+                        Some(saved_config.custom_openai_api_key.clone())
+                    } else {
+                        std::env::var("OPENAI_API_KEY").ok()
+                    }
+                }
+                _ => {
+                    if !saved_config.gemini_api_key.trim().is_empty() {
+                        Some(saved_config.gemini_api_key.clone())
+                    } else {
+                        std::env::var("GEMINI_API_KEY").ok()
+                    }
+                }
+            }
+        });
+
+        // 如果用户有直接配置的 API Key，走对应 Provider 的 HTTP SSE 流式接口
+        if let Some(ref key) = resolved_api_key {
+            let client = reqwest::Client::new();
+
+            if selected_provider == "deepseek" || selected_provider == "openai" {
+                let endpoint = if selected_provider == "deepseek" {
+                    "https://api.deepseek.com/v1/chat/completions".to_string()
+                } else if !saved_config.custom_openai_endpoint.trim().is_empty() {
+                    let mut ep = saved_config.custom_openai_endpoint.trim().to_string();
+                    if !ep.ends_with("/chat/completions") {
+                        if ep.ends_with('/') {
+                            ep.push_str("chat/completions");
+                        } else {
+                            ep.push_str("/chat/completions");
+                        }
+                    }
+                    ep
+                } else {
+                    "https://api.openai.com/v1/chat/completions".to_string()
+                };
+
+                let body = serde_json::json!({
+                    "model": if selected_provider == "deepseek" { "deepseek-chat" } else { "gpt-4o" },
+                    "messages": [
+                        {"role": "system", "content": "You are Celatura AI, an expert software developer and architect assistant."},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    "stream": true
+                });
+
+                let res = client
+                    .post(&endpoint)
+                    .header("Authorization", format!("Bearer {}", key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await;
+
+                match res {
+                    Ok(resp) if resp.status().is_success() => {
+                        let mut stream = resp.bytes_stream();
+                        let mut buffer = String::new();
+
+                        while let Some(chunk_result) = stream.next().await {
+                            if let Ok(bytes) = chunk_result {
+                                let text = String::from_utf8_lossy(&bytes);
+                                buffer.push_str(&text);
+
+                                while let Some(line_end) = buffer.find('\n') {
+                                    let line = buffer[..line_end].trim().to_string();
+                                    buffer = buffer[line_end + 1..].to_string();
+
+                                    if let Some(data_str) = line.strip_prefix("data: ") {
+                                        let data_str = data_str.trim();
+                                        if data_str == "[DONE]" {
+                                            break;
+                                        }
+                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                            if let Some(token) = v["choices"][0]["delta"]["content"].as_str() {
+                                                let _ = window.emit(
+                                                    "gemini-stream",
+                                                    GeminiStreamPayload {
+                                                        task_id: tid.clone(),
+                                                        chunk: token.to_string(),
+                                                        is_done: false,
+                                                        is_error: false,
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let _ = window.emit(
+                            "gemini-stream",
+                            GeminiStreamPayload {
+                                task_id: tid,
+                                chunk: "".to_string(),
+                                is_done: true,
+                                is_error: false,
+                            },
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!("HTTP SSE 请求发生错误: {}", e);
+                    }
+                    _ => {}
+                }
+            } else if selected_provider == "gemini" {
+                let model_name = if target_model.contains("Flash") { "gemini-1.5-flash" } else { "gemini-1.5-pro" };
+                let url = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                    model_name, key
+                );
+
+                let body = serde_json::json!({
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": full_prompt}]
+                        }
+                    ]
+                });
+
+                let res = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await;
+
+                match res {
+                    Ok(resp) if resp.status().is_success() => {
+                        let mut stream = resp.bytes_stream();
+                        let mut buffer = String::new();
+
+                        while let Some(chunk_result) = stream.next().await {
+                            if let Ok(bytes) = chunk_result {
+                                let text = String::from_utf8_lossy(&bytes);
+                                buffer.push_str(&text);
+
+                                while let Some(line_end) = buffer.find('\n') {
+                                    let line = buffer[..line_end].trim().to_string();
+                                    buffer = buffer[line_end + 1..].to_string();
+
+                                    if let Some(data_str) = line.strip_prefix("data: ") {
+                                        let data_str = data_str.trim();
+                                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                            if let Some(token) = v["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                                                let _ = window.emit(
+                                                    "gemini-stream",
+                                                    GeminiStreamPayload {
+                                                        task_id: tid.clone(),
+                                                        chunk: token.to_string(),
+                                                        is_done: false,
+                                                        is_error: false,
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let _ = window.emit(
+                            "gemini-stream",
+                            GeminiStreamPayload {
+                                task_id: tid,
+                                chunk: "".to_string(),
+                                is_done: true,
+                                is_error: false,
+                            },
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        println!("Gemini SSE 请求发生错误: {}", e);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 回退逻辑：启动系统 gemini CLI
         #[cfg(target_os = "windows")]
         let mut cmd = tokio::process::Command::new("cmd");
         #[cfg(target_os = "windows")]
-        cmd.args(["/C", "gemini", &prompt]);
+        cmd.args(["/C", "gemini", &full_prompt]);
 
         #[cfg(not(target_os = "windows"))]
         let mut cmd = tokio::process::Command::new("gemini");
         #[cfg(not(target_os = "windows"))]
-        cmd.arg(&prompt);
+        cmd.arg(&full_prompt);
 
         for (k, v) in std::env::vars() {
             cmd.env(k, v);
         }
 
-        // 如果获取到有效的 API Key，将其注入进程环境变量
         if let Some(ref key) = resolved_api_key {
             cmd.env("GEMINI_API_KEY", key);
-        }
-        if !saved_config.deepseek_api_key.trim().is_empty() {
-            cmd.env("DEEPSEEK_API_KEY", &saved_config.deepseek_api_key);
-        }
-        if !saved_config.custom_openai_api_key.trim().is_empty() {
-            cmd.env("OPENAI_API_KEY", &saved_config.custom_openai_api_key);
-        }
-        if !saved_config.custom_openai_endpoint.trim().is_empty() {
-            cmd.env("OPENAI_BASE_URL", &saved_config.custom_openai_endpoint);
-        }
-        if let Some(ref m) = model {
-            cmd.env("CELATURA_ACTIVE_MODEL", m);
         }
 
         if let Some(ref ws) = current_workspace {
@@ -223,12 +467,12 @@ pub mod commands {
                     "gemini-stream",
                     GeminiStreamPayload {
                         task_id: tid.clone(),
-                        chunk: format!("无法拉起大模型命令执行器，请检查 CLI 是否已安装并放入系统 PATH 环境变量: {}\n", e),
+                        chunk: format!("无法拉起大模型 API 或 CLI 进程，请检查 API Key 配置或系统 PATH: {}\n", e),
                         is_done: true,
                         is_error: true,
                     },
                 );
-                return Err(format!("拉起 CLI 进程失败: {}", e));
+                return Err(format!("拉起进程失败: {}", e));
             }
         };
 
@@ -294,6 +538,30 @@ pub mod commands {
 
         Ok(())
     }
+
+    /// Command 5: 兼容原有前端调用的 execute_gemini_task 命令
+    #[tauri::command]
+    pub async fn execute_gemini_task(
+        window: tauri::Window,
+        app_handle: AppHandle,
+        prompt: String,
+        current_workspace: Option<String>,
+        task_id: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<(), String> {
+        execute_llm_task(
+            window,
+            app_handle,
+            prompt,
+            current_workspace,
+            task_id,
+            model,
+            None,
+            api_key,
+        )
+        .await
+    }
 }
 
 /// Tauri 应用入口与指令挂载
@@ -308,6 +576,7 @@ pub fn run() {
             commands::load_model_config,
             commands::save_model_config,
             commands::check_api_key_status,
+            commands::execute_llm_task,
             commands::execute_gemini_task
         ])
         .run(tauri::generate_context!())

@@ -15,7 +15,8 @@ import {
   ChevronDown,
   Zap,
   Globe,
-  Cpu,
+  HardDrive,
+  FolderCheck,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -38,13 +39,13 @@ interface GeminiStreamPayload {
 
 /// 支持的核心大语言模型提供商定义
 const AVAILABLE_MODELS = [
-  { id: 'Gemini 1.5 Pro', name: 'Gemini 1.5 Pro (CLI Native)', provider: 'Google', icon: Sparkles, color: 'text-brand-400' },
-  { id: 'Gemini 1.5 Flash', name: 'Gemini 1.5 Flash', provider: 'Google', icon: Sparkles, color: 'text-emerald-400' },
-  { id: 'DeepSeek V3 / R1', name: 'DeepSeek V3 / R1 Reasoning', provider: 'DeepSeek', icon: Zap, color: 'text-sky-400' },
-  { id: 'Custom OpenAI', name: 'Custom OpenAI-Compatible', provider: 'Custom', icon: Globe, color: 'text-purple-400' },
+  { id: 'Gemini 1.5 Pro', name: 'Gemini 1.5 Pro (CLI Native)', provider: 'gemini', icon: Sparkles, color: 'text-brand-400' },
+  { id: 'Gemini 1.5 Flash', name: 'Gemini 1.5 Flash', provider: 'gemini', icon: Sparkles, color: 'text-emerald-400' },
+  { id: 'DeepSeek V3 / R1', name: 'DeepSeek V3 / R1 Reasoning', provider: 'deepseek', icon: Zap, color: 'text-sky-400' },
+  { id: 'Custom OpenAI', name: 'Custom OpenAI-Compatible', provider: 'openai', icon: Globe, color: 'text-purple-400' },
 ];
 
-/// 自定义高阶代码块容器
+/// 自定义高阶代码块容器（包含语言标签与一键复制功能）
 const CodeBlock: React.FC<{ language: string; value: string }> = ({ language, value }) => {
   const [copied, setCopied] = useState(false);
 
@@ -54,7 +55,7 @@ const CodeBlock: React.FC<{ language: string; value: string }> = ({ language, va
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      console.error('复制失败:', err);
+      console.error('复制代码失败:', err);
     }
   };
 
@@ -67,7 +68,7 @@ const CodeBlock: React.FC<{ language: string; value: string }> = ({ language, va
         </div>
         <button
           onClick={handleCopy}
-          className="flex items-center space-x-1 px-2 py-1 rounded-md bg-surface-hover hover:bg-white/10 text-gray-300 transition-colors"
+          className="flex items-center space-x-1 px-2.5 py-1 rounded-md bg-surface-hover hover:bg-white/10 text-gray-300 transition-colors"
         >
           {copied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
           <span>{copied ? '已复制' : '复制代码'}</span>
@@ -86,7 +87,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       id: 'welcome',
       sender: 'assistant',
       content:
-        '欢迎使用 **Celatura 商业级多模型凭证智能体工作台**。系统已自动联动 Tauri 2 原生 IPC 与环境凭证引擎。配置 API Key 或注入环境变量后，选择代码工作区与目标大语言模型，AI 将全自动展开多流式任务执行。',
+        '欢迎使用 **Celatura 多模型中转与工作区感知 AI 智能体**。\n\n系统已全线打通：\n1. **工作区自动感知 (Workspace Awareness)**：绑定项目目录后，自动提取项目文件树与清单注入 Prompt Context。\n2. **多模型 SSE 流式分发**：支持 Gemini、DeepSeek 及自定义 OpenAI API 高速零延迟推流。',
       timestamp: '00:00',
     },
   ]);
@@ -107,7 +108,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     scrollToBottom();
   }, [messages]);
 
-  // 监听 Tauri 2 后端发射的 gemini-stream 流式事件
+  // 监听 Tauri 2 后端发射的 gemini-stream 流式 Token 事件
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
@@ -151,25 +152,25 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     };
   }, []);
 
-  // 选择本地工作区目录
+  // 选择本地项目工作区目录
   const handleSelectWorkspace = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const selected = await open({
         directory: true,
         multiple: false,
-        title: '选择 AI 智能体绑定的本地代码库/工作区目录',
+        title: '选择 AI 智能体感知的本地代码库/工作区目录',
       });
 
       if (selected && typeof selected === 'string') {
         setWorkspace(selected);
       }
     } catch (err) {
-      console.warn('选择工作区路径操作警告:', err);
+      console.warn('选择工作区路径发生警告或暂不可用:', err);
     }
   };
 
-  // 发送任务指令
+  // 发送对话任务指令
   const handleSend = async () => {
     if (!input.trim() || isProcessing) return;
 
@@ -195,22 +196,25 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     setInput('');
     setIsProcessing(true);
 
+    const activeModelObj = AVAILABLE_MODELS.find((m) => m.id === selectedModel) || AVAILABLE_MODELS[0];
+
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('execute_gemini_task', {
+      await invoke('execute_llm_task', {
         prompt: userPrompt,
         currentWorkspace: workspace,
         taskId: taskId,
         model: selectedModel,
+        provider: activeModelObj.provider,
       });
     } catch (err: any) {
-      console.error('调用 execute_gemini_task 失败:', err);
+      console.error('调用 execute_llm_task 发生错误:', err);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === taskId
             ? {
                 ...m,
-                content: `执行失败或无法拉起大模型命令管道: ${err?.message || err}`,
+                content: `执行失败或无法拉起底层大模型通信管道: ${err?.message || err}`,
                 isStreaming: false,
                 isError: true,
               }
@@ -226,14 +230,14 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
 
   return (
     <div className="flex-1 h-full bg-background flex flex-col justify-between overflow-hidden select-none">
-      {/* 顶部 Header：多模型选择下拉菜单与工作区绑定 */}
+      {/* 顶部 Header：模型切换下拉框与工作区绑定控制器 */}
       <header className="h-14 border-b border-surface-border/80 px-6 flex items-center justify-between bg-surface/30 backdrop-blur-md relative z-20">
         <div className="flex items-center space-x-3">
-          {/* 模型选择器下拉列表 */}
+          {/* 下拉模型选择列表 */}
           <div className="relative">
             <button
               onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-              className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border hover:border-brand-500/50 text-xs text-gray-200 transition-colors"
+              className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-surface border border-surface-border hover:border-brand-500/50 text-xs text-gray-200 transition-colors shadow-sm"
             >
               <IconComp className={`w-3.5 h-3.5 ${activeModelObj.color}`} />
               <span className="font-medium">{activeModelObj.name}</span>
@@ -249,7 +253,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
                   className="absolute top-full left-0 mt-1 w-64 bg-[#0f111a] border border-surface-border/90 rounded-xl p-1.5 shadow-2xl z-30"
                 >
                   <div className="px-2 py-1 text-[10px] text-gray-500 font-mono uppercase tracking-wider">
-                    提供商与目标大模型
+                    提供商与目标模型路由
                   </div>
                   {AVAILABLE_MODELS.map((item) => {
                     const ItemIcon = item.icon;
@@ -280,19 +284,27 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             </AnimatePresence>
           </div>
 
-          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 Native Stream</span>
+          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 SSE Stream Engine</span>
         </div>
 
-        {/* 工作区路径绑定按钮 */}
+        {/* 精美工作区感知绑定按钮与常驻卡片 */}
         <div className="flex items-center space-x-2">
           <button
             onClick={handleSelectWorkspace}
-            className="flex items-center space-x-2 px-3 py-1.5 rounded-lg border border-surface-border/80 bg-surface/60 hover:bg-surface text-xs text-gray-300 hover:text-white transition-all shadow-sm active:scale-95"
-            title="选择 AI 助手执行指令的本地代码库根目录"
+            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg border text-xs transition-all shadow-sm active:scale-95 ${
+              workspace
+                ? 'bg-brand-500/10 border-brand-500/40 text-brand-300 font-medium'
+                : 'border-surface-border/80 bg-surface/60 hover:bg-surface text-gray-300 hover:text-white'
+            }`}
+            title="点击选择本地项目目录，AI 将自动扫描架构并提取依赖 Context"
           >
-            <FolderOpen className="w-3.5 h-3.5 text-brand-400" />
-            <span className="font-mono max-w-[200px] truncate">
-              {workspace ? workspace.split(/[/\\]/).pop() || workspace : '选择工作区目录'}
+            {workspace ? (
+              <FolderCheck className="w-3.5 h-3.5 text-brand-400" />
+            ) : (
+              <FolderOpen className="w-3.5 h-3.5 text-gray-400" />
+            )}
+            <span className="font-mono max-w-[220px] truncate">
+              {workspace ? `Celatura: ${workspace.split(/[/\\]/).pop() || workspace}` : '选择本地项目工作区'}
             </span>
           </button>
         </div>
@@ -351,13 +363,13 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
                         },
                       }}
                     >
-                      {msg.content || (msg.isStreaming ? '正在生成回复并同步中...' : '')}
+                      {msg.content || (msg.isStreaming ? '正在接收实时 Token 流...' : '')}
                     </ReactMarkdown>
                   )}
                   {msg.isStreaming && (
                     <span className="inline-flex items-center ml-2 text-brand-400 animate-pulse">
                       <Loader2 className="w-3 h-3 animate-spin inline mr-1" />
-                      思考执行中...
+                      思考推演中...
                     </span>
                   )}
                 </div>
@@ -383,18 +395,18 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             }}
             placeholder={
               workspace
-                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 下由 [${selectedModel}] 下达对话任务 (Shift + Enter 换行)...`
-                : `由 [${selectedModel}] 下达对话任务 (建议在右上角绑定工作区)...`
+                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 中下达 AI 对话任务 (Shift + Enter 换行)...`
+                : `由 [${selectedModel}] 下达对话任务 (建议先在右上角选定项目工作区)...`
             }
             rows={2}
             className="w-full bg-transparent text-xs text-gray-100 placeholder-gray-500 resize-none outline-none px-2"
           />
 
           <div className="flex items-center justify-between pt-2 border-t border-surface-border/40 px-1">
-            <div className="flex items-center space-x-1 text-gray-400 text-xs font-mono">
+            <div className="flex items-center space-x-1.5 text-gray-400 text-xs font-mono">
               <Terminal className="w-3.5 h-3.5 text-gray-500" />
               <span className="text-[11px] text-gray-500">
-                {workspace ? `Workspace: ${workspace}` : '未绑定工作区'}
+                {workspace ? `Context: Celatura [${workspace}]` : '未注入项目上下文'}
               </span>
             </div>
 
