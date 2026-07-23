@@ -6,13 +6,23 @@ use std::process::Stdio;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// 流式推送负载数据结构
+/// 流式推送文本负载数据结构
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GeminiStreamPayload {
     pub task_id: String,
     pub chunk: String,
     pub is_done: bool,
     pub is_error: bool,
+}
+
+/// 终端控制台日志实时广播数据结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TerminalLogPayload {
+    pub task_id: String,
+    pub command: String,
+    pub log: String,
+    pub is_done: bool,
+    pub exit_code: Option<i32>,
 }
 
 /// 多模型 API Key 凭证配置结构体
@@ -91,14 +101,7 @@ fn build_workspace_context(workspace_path: &str) -> Option<String> {
             }
             let file_name = entry.file_name().to_string_lossy().to_string();
             // 忽略常见大中型临时与构建目录
-            if file_name == "node_modules"
-                || file_name == ".git"
-                || file_name == "target"
-                || file_name == ".next"
-                || file_name == "out"
-                || file_name == "dist"
-                || file_name == "build"
-            {
+            if matches!(file_name.as_str(), "node_modules" | ".git" | "target" | ".next" | "out" | "dist" | "build") {
                 continue;
             }
 
@@ -126,6 +129,126 @@ fn build_workspace_context(workspace_path: &str) -> Option<String> {
     }
 
     Some(context)
+}
+
+/// Agent Tool Calling 本地终端命令真正执行捕获器
+pub async fn run_local_command_and_capture(
+    window: &tauri::Window,
+    task_id: &str,
+    command: &str,
+    workspace: Option<&str>,
+) -> Result<String, String> {
+    let clean_cmd = command.trim();
+    if clean_cmd.is_empty() {
+        return Ok(String::new());
+    }
+
+    let _ = window.emit(
+        "terminal-log",
+        TerminalLogPayload {
+            task_id: task_id.to_string(),
+            command: clean_cmd.to_string(),
+            log: format!(">>> 开始在工作区执行 Agent 终端命令: {}\n", clean_cmd),
+            is_done: false,
+            exit_code: None,
+        },
+    );
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = tokio::process::Command::new("cmd");
+    #[cfg(target_os = "windows")]
+    cmd.args(["/C", clean_cmd]);
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = tokio::process::Command::new("sh");
+    #[cfg(not(target_os = "windows"))]
+    cmd.args(["-c", clean_cmd]);
+
+    if let Some(ws) = workspace {
+        let path = PathBuf::from(ws);
+        if path.exists() && path.is_dir() {
+            cmd.current_dir(path);
+        }
+    }
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let err_msg = format!("执行命令失败: {}\n", e);
+            let _ = window.emit(
+                "terminal-log",
+                TerminalLogPayload {
+                    task_id: task_id.to_string(),
+                    command: clean_cmd.to_string(),
+                    log: err_msg.clone(),
+                    is_done: true,
+                    exit_code: Some(-1),
+                },
+            );
+            return Err(err_msg);
+        }
+    };
+
+    let mut captured_output = String::new();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    if let Some(stdout) = stdout {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let cleaned = strip_ansi_codes(&line);
+            captured_output.push_str(&cleaned);
+            captured_output.push('\n');
+            let _ = window.emit(
+                "terminal-log",
+                TerminalLogPayload {
+                    task_id: task_id.to_string(),
+                    command: clean_cmd.to_string(),
+                    log: format!("{}\n", cleaned),
+                    is_done: false,
+                    exit_code: None,
+                },
+            );
+        }
+    }
+
+    if let Some(stderr) = stderr {
+        let mut reader = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let cleaned = strip_ansi_codes(&line);
+            captured_output.push_str(&cleaned);
+            captured_output.push('\n');
+            let _ = window.emit(
+                "terminal-log",
+                TerminalLogPayload {
+                    task_id: task_id.to_string(),
+                    command: clean_cmd.to_string(),
+                    log: format!("[STDERR] {}\n", cleaned),
+                    is_done: false,
+                    exit_code: None,
+                },
+            );
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| format!("等待命令结束错误: {}", e))?;
+    let code = status.code().unwrap_or(0);
+
+    let _ = window.emit(
+        "terminal-log",
+        TerminalLogPayload {
+            task_id: task_id.to_string(),
+            command: clean_cmd.to_string(),
+            log: format!(">>> 命令执行完成，Exit Code: {}\n", code),
+            is_done: true,
+            exit_code: Some(code),
+        },
+    );
+
+    Ok(captured_output)
 }
 
 // ============================================================================
@@ -194,7 +317,7 @@ pub mod commands {
         })
     }
 
-    /// Command 4: 多模型中转路由与 SSE 异步流式通信核心控制命令
+    /// Command 4: 多模型中转路由与 SSE 异步流式通信核心控制命令（集成 Tool Calling 本地终端广播）
     #[tauri::command]
     pub async fn execute_llm_task(
         window: tauri::Window,
@@ -224,6 +347,26 @@ pub mod commands {
             }
         }
 
+        // 检查用户是否要求在本地终端直接执行特定 Shell 命令
+        let check_run_cmd = prompt.lines().find(|l| l.trim().starts_with("exec:") || l.trim().starts_with("run:"));
+        if let Some(cmd_line) = check_run_cmd {
+            let cmd_to_exec = cmd_line.trim_start_matches("exec:").trim_start_matches("run:").trim();
+            if !cmd_to_exec.is_empty() {
+                let _ = window.emit(
+                    "gemini-stream",
+                    GeminiStreamPayload {
+                        task_id: tid.clone(),
+                        chunk: format!("⚙️ **[Celatura Agent 工具触发]**: 正在本地工作区执行终端指令 `{}` ...\n\n", cmd_to_exec),
+                        is_done: false,
+                        is_error: false,
+                    },
+                );
+
+                let term_output = run_local_command_and_capture(&window, &tid, cmd_to_exec, current_workspace.as_deref()).await.unwrap_or_default();
+                full_prompt = format!("{}\n\n[本地终端实际执行结果]:\n```\n{}\n```\n请根据以上终端真实输出总结结果或排查修复代码错误。", full_prompt, term_output);
+            }
+        }
+
         // 推导选定的 Model Provider
         let selected_provider = provider.unwrap_or_else(|| {
             if target_model.contains("DeepSeek") {
@@ -235,7 +378,7 @@ pub mod commands {
             }
         });
 
-        // 优先使用传入的 API Key，或自动读取对应 Provider 配置与系统环境变量
+        // 优先使用传入的 API Key，或自动读取对应 Provider 配置与系统环境变量 GEMINI_API_KEY
         let resolved_api_key = api_key.filter(|k| !k.trim().is_empty()).or_else(|| {
             match selected_provider.as_str() {
                 "deepseek" => {

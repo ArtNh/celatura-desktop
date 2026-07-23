@@ -15,8 +15,10 @@ import {
   ChevronDown,
   Zap,
   Globe,
-  HardDrive,
   FolderCheck,
+  Trash2,
+  ChevronUp,
+  PlayCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -35,6 +37,14 @@ interface GeminiStreamPayload {
   chunk: string;
   is_done: boolean;
   is_error: boolean;
+}
+
+interface TerminalLogPayload {
+  task_id: string;
+  command: string;
+  log: string;
+  is_done: boolean;
+  exit_code?: number;
 }
 
 /// 支持的核心大语言模型提供商定义
@@ -87,7 +97,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       id: 'welcome',
       sender: 'assistant',
       content:
-        '欢迎使用 **Celatura 多模型中转与工作区感知 AI 智能体**。\n\n系统已全线打通：\n1. **工作区自动感知 (Workspace Awareness)**：绑定项目目录后，自动提取项目文件树与清单注入 Prompt Context。\n2. **多模型 SSE 流式分发**：支持 Gemini、DeepSeek 及自定义 OpenAI API 高速零延迟推流。',
+        '欢迎使用 **Celatura 多模型 Agent 极速中转工作台**。\n\n系统已重构强化：\n1. **系统级 Tool Calling 支持**：支持通过在对话中下达命令（如 `exec: npm run build`）直接利用 `tokio::process::Command` 在当前工作区执行终端系统命令。\n2. **控制台实时推流**：下方集成暗黑控制台组件，零延迟同步显示系统真实的构建与测试日志。',
       timestamp: '00:00',
     },
   ]);
@@ -97,7 +107,14 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
   const [selectedModel, setSelectedModel] = useState<string>('Gemini 1.5 Pro');
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
 
+  // 📟 本地控制台日志小组件状态
+  const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
+  const [activeCommand, setActiveCommand] = useState<string | null>(null);
+  const [showTerminalConsole, setShowTerminalConsole] = useState<boolean>(false);
+  const [isTerminalExecuting, setIsTerminalExecuting] = useState<boolean>(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
 
   // 自动滚动到底部
   const scrollToBottom = () => {
@@ -108,14 +125,23 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     scrollToBottom();
   }, [messages]);
 
-  // 监听 Tauri 2 后端发射的 gemini-stream 流式 Token 事件
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    if (showTerminalConsole) {
+      terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [terminalLogs, showTerminalConsole]);
 
-    const setupListener = async () => {
+  // 监听 Tauri 2 后端发射的 gemini-stream 与 terminal-log 流式事件
+  useEffect(() => {
+    let unlistenStream: (() => void) | undefined;
+    let unlistenTerminal: (() => void) | undefined;
+
+    const setupListeners = async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<GeminiStreamPayload>('gemini-stream', (event) => {
+        
+        // 1. 大模型文本 Token 流监听
+        unlistenStream = await listen<GeminiStreamPayload>('gemini-stream', (event) => {
           const { task_id, chunk, is_done, is_error } = event.payload;
 
           setMessages((prevMessages) => {
@@ -140,15 +166,25 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             setIsProcessing(false);
           }
         });
+
+        // 2. 本地系统终端控制台日志推流监听
+        unlistenTerminal = await listen<TerminalLogPayload>('terminal-log', (event) => {
+          const { command, log, is_done } = event.payload;
+          setActiveCommand(command);
+          setShowTerminalConsole(true);
+          setIsTerminalExecuting(!is_done);
+          setTerminalLogs((prev) => [...prev, log]);
+        });
       } catch (err) {
         console.warn('当前运行于纯 Web 模式或 Tauri API 未初始化:', err);
       }
     };
 
-    setupListener();
+    setupListeners();
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenStream) unlistenStream();
+      if (unlistenTerminal) unlistenTerminal();
     };
   }, []);
 
@@ -381,8 +417,71 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
         <div ref={messagesEndRef} />
       </main>
 
+      {/* 📟 本地控制台日志小组件（暗黑极简可折叠终端） */}
+      <AnimatePresence>
+        {showTerminalConsole && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="px-6 pb-2"
+          >
+            <div className="bg-[#06080e] border border-surface-border/90 rounded-xl overflow-hidden shadow-2xl">
+              {/* 控制台 Bar */}
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[#0a0d17] border-b border-surface-border/50 text-[11px] font-mono text-gray-400">
+                <div className="flex items-center space-x-2">
+                  <Terminal className="w-3.5 h-3.5 text-brand-400" />
+                  <span className="text-gray-200 font-semibold">📟 本地控制台日志</span>
+                  {activeCommand && (
+                    <span className="text-[10px] bg-brand-500/20 text-brand-300 px-2 py-0.5 rounded border border-brand-500/30 truncate max-w-[240px]">
+                      {activeCommand}
+                    </span>
+                  )}
+                  {isTerminalExecuting && (
+                    <span className="flex items-center text-[10px] text-amber-400 animate-pulse">
+                      <PlayCircle className="w-3 h-3 mr-1 animate-spin" />
+                      运行中...
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center space-x-1">
+                  <button
+                    onClick={() => setTerminalLogs([])}
+                    className="p-1 rounded text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
+                    title="清空控制台日志"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setShowTerminalConsole(false)}
+                    className="p-1 rounded text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
+                    title="收起控制台"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* 日志内容滚动区 */}
+              <div className="p-3 max-h-40 overflow-y-auto font-mono text-[11px] leading-relaxed text-emerald-400 selection:bg-brand-500/40">
+                {terminalLogs.length === 0 ? (
+                  <div className="text-gray-600 italic">等待系统终端日志输出...</div>
+                ) : (
+                  terminalLogs.map((log, idx) => (
+                    <div key={idx} className="whitespace-pre-wrap">
+                      {log}
+                    </div>
+                  ))
+                )}
+                <div ref={terminalEndRef} />
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 底部任务对话输入框 */}
-      <footer className="p-6 bg-gradient-to-t from-background via-background to-transparent">
+      <footer className="p-6 pt-2 bg-gradient-to-t from-background via-background to-transparent">
         <div className="max-w-3xl mx-auto bg-surface border border-surface-border/80 rounded-2xl p-3 shadow-2xl focus-within:border-brand-500/50 transition-colors">
           <textarea
             value={input}
@@ -395,7 +494,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             }}
             placeholder={
               workspace
-                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 中下达 AI 对话任务 (Shift + Enter 换行)...`
+                ? `在工作区 [${workspace.split(/[/\\]/).pop()}] 中下达 AI 对话任务 (输入 exec: 命令可在本地终端执行)...`
                 : `由 [${selectedModel}] 下达对话任务 (建议先在右上角选定项目工作区)...`
             }
             rows={2}
@@ -403,10 +502,17 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
           />
 
           <div className="flex items-center justify-between pt-2 border-t border-surface-border/40 px-1">
-            <div className="flex items-center space-x-1.5 text-gray-400 text-xs font-mono">
-              <Terminal className="w-3.5 h-3.5 text-gray-500" />
-              <span className="text-[11px] text-gray-500">
-                {workspace ? `Context: Celatura [${workspace}]` : '未注入项目上下文'}
+            <div className="flex items-center space-x-2 text-gray-400 text-xs font-mono">
+              <button
+                onClick={() => setShowTerminalConsole(!showTerminalConsole)}
+                className="flex items-center space-x-1 hover:text-brand-400 transition-colors"
+              >
+                <Terminal className="w-3.5 h-3.5 text-brand-400" />
+                <span className="text-[11px] text-gray-400">控制台 ({terminalLogs.length})</span>
+              </button>
+              <span className="text-[11px] text-gray-600">|</span>
+              <span className="text-[11px] text-gray-500 truncate max-w-[200px]">
+                {workspace ? `Context: ${workspace}` : '未注入上下文'}
               </span>
             </div>
 
