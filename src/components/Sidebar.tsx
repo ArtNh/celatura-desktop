@@ -10,6 +10,7 @@ import {
   Settings,
   Cpu,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 
 export interface ApiKeyStatus {
@@ -21,26 +22,31 @@ export interface ApiKeyStatus {
   active_model: string;
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  updated_at: string;
+  messages: any[];
+}
+
 export interface SidebarProps {
-  onNewChat: () => void;
+  sessions: ChatSession[];
   activeSessionId: string;
   onSelectSession: (id: string) => void;
+  onNewChat: () => void;
+  onDeleteSession: (id: string) => void;
   onOpenSettings: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
-  onNewChat,
+  sessions,
   activeSessionId,
   onSelectSession,
+  onNewChat,
+  onDeleteSession,
   onOpenSettings,
 }: SidebarProps): React.JSX.Element => {
   const [status, setStatus] = useState<ApiKeyStatus | null>(null);
-
-  const mockSessions = [
-    { id: '1', title: 'Rust reqwest 网络层安全架构设计', time: '10分钟前' },
-    { id: '2', title: 'Celatura 凭证自动感知与智能流式渲染', time: '2小时前' },
-    { id: '3', title: 'Tauri 2 进程隔离与多模型异步管道', time: '昨天' },
-  ];
 
   useEffect(() => {
     checkStatus();
@@ -77,25 +83,43 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </button>
 
         <div className="pt-2">
-          <div className="px-2 pb-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
-            对话任务历史
+          <div className="px-2 pb-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider flex items-center justify-between">
+            <span>对话任务历史</span>
+            <span className="text-[10px] font-mono text-gray-600">({sessions.length})</span>
           </div>
-          <div className="space-y-1">
-            {mockSessions.map((session) => {
+          <div className="space-y-1 max-h-[380px] overflow-y-auto pr-0.5">
+            {sessions.map((session) => {
               const isActive = session.id === activeSessionId;
               return (
-                <button
+                <div
                   key={session.id}
-                  onClick={() => onSelectSession(session.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg text-xs flex items-center space-x-2.5 transition-colors ${
+                  className={`group relative flex items-center justify-between px-3 py-2.5 rounded-lg text-xs transition-colors ${
                     isActive
                       ? 'bg-surface-hover text-brand-500 font-medium border-l-2 border-brand-500'
                       : 'text-gray-400 hover:bg-surface-hover/50 hover:text-gray-200'
                   }`}
                 >
-                  <MessageSquare className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate flex-1">{session.title}</span>
-                </button>
+                  <button
+                    onClick={() => onSelectSession(session.id)}
+                    className="flex items-center space-x-2.5 flex-1 min-w-0 text-left"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate flex-1">{session.title}</span>
+                  </button>
+
+                  {sessions.length > 1 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteSession(session.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 text-gray-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-all"
+                      title="删除此会话"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>

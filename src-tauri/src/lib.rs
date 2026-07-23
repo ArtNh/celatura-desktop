@@ -46,6 +46,34 @@ pub struct ApiKeyStatus {
     pub active_model: String,
 }
 
+/// 对话消息序列化结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatMessage {
+    pub id: String,
+    pub sender: String,
+    pub content: String,
+    pub timestamp: String,
+    pub is_streaming: Option<bool>,
+    pub is_error: Option<bool>,
+}
+
+/// 单个对话任务 Sessions 结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub messages: Vec<ChatMessage>,
+}
+
+/// 全局对话仓储与状态持久化结构体
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct AppSessionsStore {
+    pub sessions: Vec<ChatSession>,
+    pub active_session_id: String,
+    pub current_workspace: Option<String>,
+}
+
 /// 高效过滤 ANSI 终端颜色转义字符
 fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -82,6 +110,20 @@ fn get_model_config_file_path(app_handle: &AppHandle) -> Result<PathBuf, String>
     Ok(config_dir.join("model_config.json"))
 }
 
+/// 获取 Sessions 历史仓储文件路径
+fn get_sessions_store_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("获取应用配置目录失败: {}", e))?;
+
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir).map_err(|e| format!("创建配置目录失败: {}", e))?;
+    }
+
+    Ok(config_dir.join("chat_sessions.json"))
+}
+
 /// 本地工作区感知 (Workspace Awareness) 自动预扫描提取函数
 fn build_workspace_context(workspace_path: &str) -> Option<String> {
     let path = Path::new(workspace_path);
@@ -100,7 +142,6 @@ fn build_workspace_context(workspace_path: &str) -> Option<String> {
                 break;
             }
             let file_name = entry.file_name().to_string_lossy().to_string();
-            // 忽略常见大中型临时与构建目录
             if matches!(file_name.as_str(), "node_modules" | ".git" | "target" | ".next" | "out" | "dist" | "build") {
                 continue;
             }
@@ -317,7 +358,57 @@ pub mod commands {
         })
     }
 
-    /// Command 4: 多模型中转路由与 SSE 异步流式通信核心控制命令（集成 Tool Calling 本地终端广播）
+    /// Command 4: 读取本地历史对话与工作区状态仓储
+    #[tauri::command]
+    pub fn load_sessions_store(app_handle: AppHandle) -> Result<AppSessionsStore, String> {
+        let file_path = get_sessions_store_file_path(&app_handle)?;
+        if file_path.exists() {
+            let content = fs::read_to_string(&file_path)
+                .map_err(|e| format!("读取对话历史仓储失败: {}", e))?;
+            if let Ok(store) = serde_json::from_str::<AppSessionsStore>(&content) {
+                if !store.sessions.is_empty() {
+                    return Ok(store);
+                }
+            }
+        }
+
+        // 初次启动，创建初始标准会话
+        let default_session = ChatSession {
+            id: "session_default".to_string(),
+            title: "Celatura 智能体交互对话".to_string(),
+            updated_at: "刚刚".to_string(),
+            messages: vec![ChatMessage {
+                id: "welcome".to_string(),
+                sender: "assistant".to_string(),
+                content: "欢迎使用 **Celatura 商业级多模型凭证智能体工作台**。历史记录与工作区路径已开启本地 JSON 数据库安全持久化，跨会话无感恢复。".to_string(),
+                timestamp: "00:00".to_string(),
+                is_streaming: Some(false),
+                is_error: Some(false),
+            }],
+        };
+
+        Ok(AppSessionsStore {
+            sessions: vec![default_session],
+            active_session_id: "session_default".to_string(),
+            current_workspace: None,
+        })
+    }
+
+    /// Command 5: 保存本地历史对话与工作区状态仓储
+    #[tauri::command]
+    pub fn save_sessions_store(
+        store: AppSessionsStore,
+        app_handle: AppHandle,
+    ) -> Result<(), String> {
+        let file_path = get_sessions_store_file_path(&app_handle)?;
+        let json_data = serde_json::to_string_pretty(&store)
+            .map_err(|e| format!("序列化对话仓储失败: {}", e))?;
+
+        fs::write(file_path, json_data).map_err(|e| format!("保存对话仓储文件失败: {}", e))?;
+        Ok(())
+    }
+
+    /// Command 6: 多模型中转路由与 SSE 异步流式通信核心控制命令（集成 Tool Calling 本地终端广播）
     #[tauri::command]
     pub async fn execute_llm_task(
         window: tauri::Window,
@@ -682,7 +773,7 @@ pub mod commands {
         Ok(())
     }
 
-    /// Command 5: 兼容原有前端调用的 execute_gemini_task 命令
+    /// Command 7: 兼容原有前端调用的 execute_gemini_task 命令
     #[tauri::command]
     pub async fn execute_gemini_task(
         window: tauri::Window,
@@ -719,6 +810,8 @@ pub fn run() {
             commands::load_model_config,
             commands::save_model_config,
             commands::check_api_key_status,
+            commands::load_sessions_store,
+            commands::save_sessions_store,
             commands::execute_llm_task,
             commands::execute_gemini_task
         ])

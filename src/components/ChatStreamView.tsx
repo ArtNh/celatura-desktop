@@ -17,7 +17,6 @@ import {
   Globe,
   FolderCheck,
   Trash2,
-  ChevronUp,
   PlayCircle,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -30,6 +29,13 @@ export interface Message {
   timestamp: string;
   isStreaming?: boolean;
   isError?: boolean;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  updated_at: string;
+  messages: Message[];
 }
 
 interface GeminiStreamPayload {
@@ -45,6 +51,13 @@ interface TerminalLogPayload {
   log: string;
   is_done: boolean;
   exit_code?: number;
+}
+
+interface ChatStreamViewProps {
+  activeSession: ChatSession;
+  workspace: string | null;
+  onWorkspaceChange: (ws: string) => void;
+  onMessagesUpdate: (sessionId: string, messages: Message[]) => void;
 }
 
 /// 支持的核心大语言模型提供商定义
@@ -91,18 +104,14 @@ const CodeBlock: React.FC<{ language: string; value: string }> = ({ language, va
   );
 };
 
-export const ChatStreamView: React.FC = (): React.JSX.Element => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'welcome',
-      sender: 'assistant',
-      content:
-        '欢迎使用 **Celatura 多模型 Agent 极速中转工作台**。\n\n系统已重构强化：\n1. **系统级 Tool Calling 支持**：支持通过在对话中下达命令（如 `exec: npm run build`）直接利用 `tokio::process::Command` 在当前工作区执行终端系统命令。\n2. **控制台实时推流**：下方集成暗黑控制台组件，零延迟同步显示系统真实的构建与测试日志。',
-      timestamp: '00:00',
-    },
-  ]);
+export const ChatStreamView: React.FC<ChatStreamViewProps> = ({
+  activeSession,
+  workspace,
+  onWorkspaceChange,
+  onMessagesUpdate,
+}: ChatStreamViewProps): React.JSX.Element => {
+  const [messages, setMessages] = useState<Message[]>(activeSession.messages || []);
   const [input, setInput] = useState<string>('');
-  const [workspace, setWorkspace] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [selectedModel, setSelectedModel] = useState<string>('Gemini 1.5 Pro');
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState<boolean>(false);
@@ -115,6 +124,11 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const terminalEndRef = useRef<HTMLDivElement>(null);
+
+  // 响应切换 activeSession
+  useEffect(() => {
+    setMessages(activeSession.messages || []);
+  }, [activeSession.id]);
 
   // 自动滚动到底部
   const scrollToBottom = () => {
@@ -139,7 +153,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
     const setupListeners = async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        
+
         // 1. 大模型文本 Token 流监听
         unlistenStream = await listen<GeminiStreamPayload>('gemini-stream', (event) => {
           const { task_id, chunk, is_done, is_error } = event.payload;
@@ -159,6 +173,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
               isError: is_error,
             };
 
+            onMessagesUpdate(activeSession.id, updatedMessages);
             return updatedMessages;
           });
 
@@ -186,7 +201,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       if (unlistenStream) unlistenStream();
       if (unlistenTerminal) unlistenTerminal();
     };
-  }, []);
+  }, [activeSession.id, onMessagesUpdate]);
 
   // 选择本地项目工作区目录
   const handleSelectWorkspace = async () => {
@@ -199,10 +214,10 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       });
 
       if (selected && typeof selected === 'string') {
-        setWorkspace(selected);
+        onWorkspaceChange(selected);
       }
     } catch (err) {
-      console.warn('选择工作区路径发生警告或暂不可用:', err);
+      console.warn('选择工作区路径发生警告:', err);
     }
   };
 
@@ -228,7 +243,9 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       isStreaming: true,
     };
 
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    const newMsgs = [...messages, userMsg, assistantMsg];
+    setMessages(newMsgs);
+    onMessagesUpdate(activeSession.id, newMsgs);
     setInput('');
     setIsProcessing(true);
 
@@ -245,8 +262,8 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
       });
     } catch (err: any) {
       console.error('调用 execute_llm_task 发生错误:', err);
-      setMessages((prev) =>
-        prev.map((m) =>
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
           m.id === taskId
             ? {
                 ...m,
@@ -255,8 +272,10 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
                 isError: true,
               }
             : m
-        )
-      );
+        );
+        onMessagesUpdate(activeSession.id, updated);
+        return updated;
+      });
       setIsProcessing(false);
     }
   };
@@ -320,7 +339,7 @@ export const ChatStreamView: React.FC = (): React.JSX.Element => {
             </AnimatePresence>
           </div>
 
-          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 SSE Stream Engine</span>
+          <span className="text-[11px] text-gray-500 font-mono hidden sm:inline">Tauri 2 Persistent Store</span>
         </div>
 
         {/* 精美工作区感知绑定按钮与常驻卡片 */}
